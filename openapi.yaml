@@ -1,0 +1,1318 @@
+openapi: 3.1.2
+info:
+  title: Sona x402 engine
+  version: 1.0.0
+  summary: Internal reads of x402 payments on Monad and Base, called only by sona-api.
+  description: |
+    This service answers questions about x402 payments on Monad and Base: which payments were made, which facilitator settled each one, how much of the volume is genuine, and who the top facilitators, sellers and payers are. An x402 payment is a signed stablecoin transfer that a facilitator submits to the chain for the payer. The service reads a database that the x402 indexers fill (Monad from its whole history, Base from 2026-09-13), classifies every payment by published rules and returns the result as clean JSON. Nothing here signs, pays, relays or settles a payment: it only reads payments that others made. Only the public `sona-api` will call this service, and it will put these bodies inside its public answers. You call it directly to debug, or to see exactly what the public API will get.
+
+    ## Pick a chain
+
+    Monad, `eip155:143`, and Base, `eip155:8453`, are served. The `{chain}` part of every path is a CAIP-2 chain id. A well-formed id of another chain answers 404 `unsupported_chain`, and an id that is not CAIP-2 shaped answers 400 `invalid_id`.
+
+    Monad is indexed from its first block. Base is indexed from 2026-09-13 only, on USDC (`0x833589fcd6edb6e08f4c7c32d4f71b54bda02913`), the two Permit2 proxies and USDC mints, and it keeps the payment rows of the last 90 days while the daily totals and rankings are kept without limit, so `/payments` on Base reaches back at most 90 days. Coinbase's CDP facilitator publishes no signer list, so a Base payment is tier A when its calldata ends in the ERC-8021 code `cdp_facil1`. The `coverage` of `/status` states the start date and the retention of a chain.
+
+    | Container | Inside the Docker network | On the host |
+    |---|---|---|
+    | `x402-engine` | `http://x402-engine:8080` | `127.0.0.1:8181` |
+
+    The Swagger gateway at `127.0.0.1:8090` has no location for this service, so the **Try it out** button of this page cannot reach it. Call it with curl instead, for example `curl http://127.0.0.1:8181/internal/v1/chains/eip155:143/x402/status`.
+
+    ## Data and freshness
+
+    Every payment gets one of three tiers. The tier decides where the payment shows up.
+
+    - `A`: the relayer, which is the address that sent the settling transaction, is a facilitator in the registry (read it at `/registry`) and the payment lies inside the block range of that address. `facilitator` is the registry id, such as `monad-foundation`.
+    - `B`: the payment has the x402 shape but its relayer is no listed facilitator, or it has no relayer. `facilitator` is the lowercase relayer address, or `unknown`. Tier B is a shape test only, so it also holds ordinary gasless transfers.
+    - `X`: not an x402 payment. Either the method is `batch_deposit`, `other` (a call routed through another contract) or `eip3009_receive`, with reason `not_x402`, or the relayer is a registered test relayer, with reason `test_relayer`. A tier X row has `facilitator` and `genuine` null. It is served by the payment routes with `tier=all` and by the transaction route, and it is left out of every leaderboard and daily total.
+
+    Raw numbers count every tier A and B payment. Genuine numbers leave out the payments that look like generated traffic. A payment is **genuine** unless `self_payment` fires, or at least 2 of the other four signals fire. One signal alone is not enough, because it also fits a real, busy seller. The service lists the signals that fired for a payment in `rules_fired`, in this order:
+
+    | Signal | Fires for a payment when |
+    |---|---|
+    | `fixed_amount` | its seller (payee) received at least 100 payments on the UTC day of the payment, and at least 90% of them have its amount |
+    | `payee_concentration` | its relayer settled at least 100 payments on the UTC day of the payment, and at least 90% of them went to its payee |
+    | `no_other_activity` | its payer made at least 5 payments, all to one payee, and never shows up as a payee or a relayer in any payment of any tier |
+    | `bridge_funded` | its payer received a USDC mint that belongs to a cluster of at least 10 different recipients, with the same amount and the same sending address of the mint transaction |
+    | `self_payment` | its payer and payee are the same address |
+
+    The thresholds are the ones of `rules_version`. They are published here so that anyone can check a verdict, and a change to them gets a new version. Volume counts USDC (`0x754704bc059f8c67012fed69bc8a327a5aafb603`, 6 decimals) only. A payment in another token still counts in the payment counts and adds 0 to volume. Every amount is a decimal string of base units, because an amount can have 78 digits.
+
+    The service does not read the chain. It reads what the indexer has stored, up to a **cutoff** of 10 blocks behind the newest block the indexer has processed, and it copies those rows into its own tables every 30 s. The newest block it has copied is the **watermark**, and no route serves a row above it. The margin keeps a chain reorganization out of the data, which is why every answer is `finalized`. A new row usually reaches the data within one to two minutes of its block: Envio's HyperSync, the indexer's source, trails the newest Monad block by about 35 s to 1.5 minutes, and the 10 blocks of margin and up to 30 s until the next refresh come on top. It takes longer when the indexer itself is behind. `/status` shows the indexer's progress, the cutoff, the watermark and the lag between them. If the indexer is rebuilt from the start, the service drops its copy and builds it again, and the data routes answer 503 until it has copied the first rows.
+
+    ## Time budget
+
+    The request header `Sona-Deadline-Ms` is the most time, in milliseconds, that a call may take. It is 5000 when the header is absent or is not a whole number. When the budget runs out the answer is 504 `deadline_exceeded`, and a value of 0 or less answers 504 at once without reading anything. The HTTP server's own write timeout is 10 s, so a budget above 10000 cannot be used in full. `sona-api` sends the time it has left minus a small margin.
+
+    ## Response headers
+
+    The leaderboard, daily, payments and transaction routes describe how fresh their data is in `Sona-*` headers: `Sona-Finality` is always `finalized`, `Sona-Block` is the watermark block, and `Sona-Block-Time` is the Unix time of the indexer's progress block. It is the time of the progress block, not of the watermark block, because the stored rows hold no block times of their own to look up. It is left out when the indexer has not reported one. `sona-api` turns these into the `meta` of its envelope. The status and registry routes are not about one block, so they send none. Every route except the two probes also sends `X-Request-Id`, the trace ID of the request: the trace ID of an incoming `traceparent` header, or a random one. Quote it when you report a problem, because the service logs the cause of each 500 and 503 under that ID.
+
+    ## Errors
+
+    Every error is `application/problem+json` (RFC 9457 problem details) with `Cache-Control: no-store`. A typical body:
+
+    ```json
+    {"type":"urn:sona:problem:invalid_id","title":"Invalid identifier","status":400,"detail":"A transaction hash is 0x and 64 hex digits.","instance":"/internal/v1/chains/eip155:143/x402/payments/0x12","code":"invalid_id"}
+    ```
+
+    Branch on `code`, which is stable. There are seven:
+
+    | Status | `code` | When |
+    |---|---|---|
+    | 400 | `invalid_query` | an unknown or malformed query parameter, `from` after `to`, a window longer than 366 days (90 on `/flows`), a `limit` out of range, a bad `cursor` |
+    | 400 | `invalid_id` | a malformed chain, transaction hash, address, facilitator id or `kind` |
+    | 404 | `unsupported_chain` | a CAIP-2 chain other than `eip155:143` and `eip155:8453` |
+    | 404 | `not_found` | no payment for a transaction hash, an unknown facilitator, seller or payer, or a path or method that no route serves (detail `No such route.`) |
+    | 500 | `internal` | anything unnamed, with the cause in the service log under the `X-Request-Id` |
+    | 503 | `upstream_unavailable` | no data yet (the indexer is not initialised or the first rows are not copied) or the database does not answer, always with `Retry-After: 1` |
+    | 504 | `deadline_exceeded` | the time budget ran out |
+
+    `instance` is the path of the request. If the caller disconnects before the answer is ready, the service counts the call as 499 and sends no body.
+
+    ## Coverage and limits
+
+    `/status` lists these limits in `coverage`, each with a code:
+
+    - `batch_channels_not_indexed`: the batch scheme is not indexed. Its deposits show up as `batch_deposit`, are tier X and are left out of every total, so the requests and revenue of that scheme are not captured.
+    - `tier_b_is_shape_only`: tier B holds every payment of the x402 shape from a relayer that is no listed facilitator, so it includes ordinary gasless transfers.
+    - `volume_usdc_only`: volume counts USDC only. A payment in another token adds to the payment counts and adds 0 to volume.
+    - `reverted_settlements_not_visible`: a reverted settlement leaves no log, so failed attempts and failure rates cannot be seen.
+    - `upto_ceiling_not_captured`: the Upto scheme stores the amount that was settled. The ceiling the payer signed is not captured.
+    - `history_starts`: only on a chain that is indexed from a given day, which is Base (2026-09-13). Earlier payments are not counted.
+    - `payment_rows_pruned`: only on a chain that keeps payment rows for a limited time, which is Base (90 days). Older payments are gone from `/payments`, their daily totals and the rankings stay, computed under the rules in force at the time. A payer's history for the rules reaches back only 90 days, so a payer whose older payments were pruned can be judged on its recent ones alone.
+
+    Genuine is a heuristic. Both volume rules can fire for one real, busy seller with a single price and a single facilitator in a day, and small scripted traffic below 100 payments a day passes as genuine. That is why every verdict comes with its `rules_fired`.
+
+    A leaderboard or daily window is at most 366 days, and a flows window at most 90. A leaderboard returns at most 100 items and a page of payments at most 200.
+
+    ## How this differs from the public API
+
+    - The body is the bare record, with no `data`, `meta` and `links` envelope.
+    - There are no credits, rate limits, payment headers or authentication. Access is limited by the network: the service listens only on the Docker network and on `127.0.0.1`.
+    - There is no caching. Successful answers carry no `Cache-Control` or `ETag`.
+    - Addresses and hashes in the answers are lowercase, without an EIP-55 checksum, and a request takes them in any case without checking a checksum. Amounts and `valid_after` and `valid_before` are decimal strings, times are RFC 3339 in UTC and days are `YYYY-MM-DD`.
+    - Only `GET` is used.
+servers:
+  - url: http://127.0.0.1:8181
+    description: x402-engine on the host, serving Monad (eip155:143) and Base (eip155:8453)
+tags:
+  - name: Status
+    description: |
+      How far the indexer and the engine have got, and the registry of facilitators the tiers are built on.
+  - name: Leaderboards
+    description: |
+      Facilitators, sellers or payers ranked over a window of days.
+  - name: Daily
+    description: |
+      One facilitator, seller or payer, day by day.
+  - name: Payments
+    description: |
+      Single payments, newest first, and all payments of one transaction.
+  - name: Operations
+    description: |
+      Probes for the container health check and for operators. They have no body and no request ID.
+paths:
+  /internal/v1/chains/{chain}/x402/status:
+    parameters:
+      - $ref: '#/components/parameters/Chain'
+    get:
+      operationId: getX402Status
+      tags: [Status]
+      summary: Get the progress of the indexer and the engine
+      description: |
+        Call this to see how current the data is and whether the service is able to answer data requests. The body has four parts:
+
+        - `indexer`: what the indexer reports. `initialised` is false while the indexer has not created its tables, and then the data routes answer 503. `progress_block` is the newest block it has processed, `source_block` is the newest block its data source knows, `is_ready` says it has caught up, and `progress_age_s` is the whole seconds between now and the time of the progress block (null when there is no block time yet).
+        - `engine`: `cutoff_block` is `progress_block` minus 10, the newest block the engine may copy. `watermark_block` is the newest block it has copied, `-1` before the first copy, and `watermark_time` is the time of the progress block, which is also `Sona-Block-Time` on the data routes. `lag_blocks` is `progress_block` minus `watermark_block` (null before the first copy). `refreshed_at` and `refresh_ms` say when the last refresh ended and how long it took.
+        - `registry_version` and `rules_version`: the versions the tiers and the genuine rules were computed with. Both are empty until the engine has copied its first rows.
+        - `rows`: how many payments the engine holds, in total and per tier, and how many USDC mints. The mints feed the `bridge_funded` signal.
+
+        `coverage` lists the limits of the data, each with a stable code and a sentence. Monad has five, always in this order: `batch_channels_not_indexed`, `tier_b_is_shape_only`, `volume_usdc_only`, `reverted_settlements_not_visible` and `upto_ceiling_not_captured`. Base has the same five and then `history_starts` and `payment_rows_pruned`.
+
+        The route answers 200 whenever the database answers, also while the indexer does not exist yet. It reads only the progress record, so it is quick, and it sends no `Sona-*` header, only `X-Request-Id`.
+
+        Errors: 503 `upstream_unavailable` when the database does not answer, and 504 `deadline_exceeded` when the budget runs out.
+      parameters:
+        - $ref: '#/components/parameters/DeadlineMs'
+      responses:
+        "200":
+          description: The database answered. The body is the status. Besides the content headers only `X-Request-Id` is sent.
+          headers:
+            X-Request-Id: {$ref: '#/components/headers/RequestId'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Status'}
+              examples:
+                running:
+                  summary: A caught-up indexer and an engine 10 blocks behind it
+                  value: {"kind": "x402_status", "chain": "eip155:143", "indexer": {"initialised": true, "progress_block": 112740998, "source_block": 112741001, "is_ready": true, "progress_age_s": 3}, "engine": {"cutoff_block": 112740988, "watermark_block": 112740988, "watermark_time": "2026-10-12T11:30:06Z", "lag_blocks": 10, "refreshed_at": "2026-10-12T11:30:09Z", "refresh_ms": 41}, "registry_version": "2026-10-12.1", "rules_version": "2026-10-12.1", "rows": {"payments": 4466012, "tier_a": 4465973, "tier_b": 24, "tier_x": 15, "mints": 250112}, "coverage": [{"code": "batch_channels_not_indexed", "note": "The batch scheme is not indexed, its deposits are labelled batch_deposit and left out of every total."}, {"code": "tier_b_is_shape_only", "note": "Tier B holds every payment of the x402 shape from a relayer that is no listed facilitator, so it includes ordinary gasless transfers."}, {"code": "volume_usdc_only", "note": "Volume counts USDC only, a payment in another token adds to the payment counts and adds 0 to volume."}, {"code": "reverted_settlements_not_visible", "note": "A reverted settlement leaves no log, so failed attempts and failure rates cannot be seen."}, {"code": "upto_ceiling_not_captured", "note": "The Upto scheme stores the settled amount, the signed ceiling is not captured."}]}
+                not_initialised:
+                  summary: The indexer has not created its tables yet
+                  value: {"kind": "x402_status", "chain": "eip155:143", "indexer": {"initialised": false, "progress_block": 0, "source_block": 0, "is_ready": false, "progress_age_s": null}, "engine": {"cutoff_block": -1, "watermark_block": -1, "watermark_time": null, "lag_blocks": null, "refreshed_at": "2026-10-12T11:30:09Z", "refresh_ms": 0}, "registry_version": "", "rules_version": "", "rows": {"payments": 0, "tier_a": 0, "tier_b": 0, "tier_x": 0, "mints": 0}, "coverage": [{"code": "batch_channels_not_indexed", "note": "The batch scheme is not indexed, its deposits are labelled batch_deposit and left out of every total."}, {"code": "tier_b_is_shape_only", "note": "Tier B holds every payment of the x402 shape from a relayer that is no listed facilitator, so it includes ordinary gasless transfers."}, {"code": "volume_usdc_only", "note": "Volume counts USDC only, a payment in another token adds to the payment counts and adds 0 to volume."}, {"code": "reverted_settlements_not_visible", "note": "A reverted settlement leaves no log, so failed attempts and failure rates cannot be seen."}, {"code": "upto_ceiling_not_captured", "note": "The Upto scheme stores the settled amount, the signed ceiling is not captured."}]}
+        "400":
+          $ref: '#/components/responses/InvalidQuery'
+          description: The chain is not a CAIP-2 id (`invalid_id`), or the request has a query parameter (`invalid_query`). This route takes none.
+        "404":
+          $ref: '#/components/responses/NotFound'
+          description: The chain is well formed but is neither `eip155:143` nor `eip155:8453` (`unsupported_chain`), or the path is not a route (`not_found`).
+        "499": {$ref: '#/components/responses/ClientClosed'}
+        "500": {$ref: '#/components/responses/Internal'}
+        "503":
+          $ref: '#/components/responses/Unavailable'
+          description: The database did not answer. Retry after the `Retry-After` of 1 s.
+        "504":
+          $ref: '#/components/responses/DeadlineExceeded'
+  /internal/v1/chains/{chain}/x402/registry:
+    parameters:
+      - $ref: '#/components/parameters/Chain'
+    get:
+      operationId: getX402Registry
+      tags: [Status]
+      summary: Get the registry of facilitators
+      description: |
+        Call this to see which relayer addresses count as which facilitator, because that registry decides tier A. The body has the `version` and the `checksum` of the registry, the `facilitators` (id, name, website and addresses) and the `relayers`, which is one entry per address with its `class`:
+
+        - `facilitator`: a listed facilitator. Its payments are tier A, and `facilitator_id` is its registry id.
+        - `unlisted`: a relayer that was seen settling payments and is no facilitator. Its payments are tier B.
+        - `test`: a relayer that only settles tests. Its payments are tier X with reason `test_relayer`.
+
+        An address applies only to payments from `from_block` to `to_block`, both inclusive, and an end that is null is open. The checksum is the SHA-256 of the canonical content, so comments and key order in the source file do not change it. When the registry changes it gets a new version and the service classifies every payment again.
+
+        The registry is held in memory, so this route does not read the database and answers 200 even when the database is down. It sends no `Sona-*` header, only `X-Request-Id`.
+
+        Errors: 400 and 404 for a bad chain or query, and 504 `deadline_exceeded` when `Sona-Deadline-Ms` is 0 or less.
+      parameters:
+        - $ref: '#/components/parameters/DeadlineMs'
+      responses:
+        "200":
+          description: The body is the active registry. Besides the content headers only `X-Request-Id` is sent.
+          headers:
+            X-Request-Id: {$ref: '#/components/headers/RequestId'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Registry'}
+              examples:
+                abbreviated:
+                  summary: The registry, cut down to two facilitators and three relayers, with the checksum of the whole registry
+                  value: {"kind": "x402_registry", "chain": "eip155:143", "version": "2026-10-12.1", "checksum": "123a6e6c0d5498edb63b4af92319dd147a5b64b5956ec4e522089cd68f74ad19", "facilitators": [{"id": "monad-foundation", "name": "Molandak", "url": "https://x402-facilitator.molandak.org", "addresses": ["0x7f6a2850669202519f0fe8aa912451238820db86"]}, {"id": "pieverse", "name": "Pieverse", "url": "https://facilitator.pieverse.io", "addresses": ["0x12343e649e6b2b2b77649dfab88f103c02f3c78b", "0xfa6b2a1fc2151197ce3242d0ea64327b798dbd4a"]}], "relayers": [{"address": "0x7f6a2850669202519f0fe8aa912451238820db86", "class": "facilitator", "facilitator_id": "monad-foundation", "from_block": null, "to_block": null}, {"address": "0x74dd46f2e70b964895fe21aa70c60a9b61fbe395", "class": "unlisted", "facilitator_id": null, "from_block": null, "to_block": null}, {"address": "0x22c4953c882264cab154ea688004e6dead21eeeb", "class": "test", "facilitator_id": null, "from_block": null, "to_block": null}]}
+        "400":
+          $ref: '#/components/responses/InvalidQuery'
+          description: The chain is not a CAIP-2 id (`invalid_id`), or the request has a query parameter (`invalid_query`). This route takes none.
+        "404":
+          $ref: '#/components/responses/NotFound'
+          description: The chain is well formed but is neither `eip155:143` nor `eip155:8453` (`unsupported_chain`), or the path is not a route (`not_found`).
+        "504":
+          $ref: '#/components/responses/DeadlineExceeded'
+          description: '`Sona-Deadline-Ms` was 0 or less. This route reads nothing, so a positive budget never runs out.'
+  /internal/v1/chains/{chain}/x402/leaderboards/{kind}:
+    parameters:
+      - $ref: '#/components/parameters/Chain'
+      - $ref: '#/components/parameters/Kind'
+    get:
+      operationId: listLeaderboard
+      tags: [Leaderboards]
+      summary: Rank facilitators, sellers or payers over a window
+      description: |
+        Call this to see who settles, receives or pays the most. `kind` picks the board: `facilitators` (who settled), `sellers` (who was paid, the payee) or `payers`. The route adds up the daily numbers of the window, so the board is exact and quick, whatever the number of payments.
+
+        The window is `from` to `to`, both inclusive UTC days in the form `YYYY-MM-DD`. Without them it is the 30 days that end on the day of the watermark (the day of `Sona-Block-Time`). With only `to` it is the 30 days that end on `to`, and with only `from` it runs to the watermark day. It spans 366 days at most.
+
+        `tier` is `A` (the default, the payments of listed facilitators only) or `AB`. The board groups by id and tier, so with `AB` one id can appear twice, once for each tier. `order` is the figure to rank by, `genuine_volume` by default, and `limit` is 1 to 100 items, 25 by default. Ties keep a fixed order by id.
+
+        An item holds the raw and genuine counts and volumes of the window and three more figures: `active_days` is the number of days with at least one raw payment, and `first_day` and `last_day` are the first and the last of them. A facilitator item also has `name`, the registry name for tier A and null for tier B, and `gas_cost`, the gas the facilitator spent in wei, as a decimal string. It is the gas limit times the gas price of the settling transaction, which is what Monad bills, added up over the payments, so a transaction that settles several payments counts once for each. Seller and payer items have neither. Volume is USDC only. Counts of distinct payers or sellers cannot be added up over days, so they are not here and are in the daily rows.
+
+        A window without any payment is not an error: the answer is 200 with empty `items`.
+
+        Errors: 400 `invalid_query` for an unknown parameter, a bad day, `from` after `to`, a window over 366 days, or a bad `limit`, `tier` or `order`, and 400 `invalid_id` for a `kind` that is none of the three. 503 `upstream_unavailable` until the engine has copied its first rows, and 504 `deadline_exceeded` when the budget runs out.
+      parameters:
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/BoardTier'
+        - $ref: '#/components/parameters/Order'
+        - $ref: '#/components/parameters/BoardLimit'
+        - $ref: '#/components/parameters/DeadlineMs'
+      responses:
+        "200":
+          description: The body is the board. The `Sona-*` headers describe the watermark.
+          headers: &dataHeaders
+            Sona-Finality: {$ref: '#/components/headers/SonaFinality'}
+            Sona-Block: {$ref: '#/components/headers/SonaBlock'}
+            Sona-Block-Time: {$ref: '#/components/headers/SonaBlockTime'}
+            X-Request-Id: {$ref: '#/components/headers/RequestId'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Leaderboard'}
+              examples:
+                facilitators:
+                  summary: The facilitators of tier A, ranked by genuine volume (example numbers)
+                  value: {"kind": "x402_leaderboard", "chain": "eip155:143", "board": "facilitators", "from": "2026-09-13", "to": "2026-10-12", "tier": "A", "order": "genuine_volume", "items": [{"id": "monad-foundation", "name": "Molandak", "tier": "A", "raw_payments": 412380, "raw_volume": "41238000", "genuine_payments": 10412, "genuine_volume": "5316200", "gas_cost": "6194372030250000000", "active_days": 12, "first_day": "2026-09-15", "last_day": "2026-10-12"}]}
+                sellers:
+                  summary: The sellers, ranked by raw volume (example numbers)
+                  value: {"kind": "x402_leaderboard", "chain": "eip155:143", "board": "sellers", "from": "2026-09-13", "to": "2026-10-12", "tier": "A", "order": "raw_volume", "items": [{"id": "0x1995159c8d4df2268a17c0169a80f0e7d11a7424", "tier": "A", "raw_payments": 410862, "raw_volume": "41086200", "genuine_payments": 0, "genuine_volume": "0", "active_days": 11, "first_day": "2026-09-15", "last_day": "2026-10-11"}]}
+        "400":
+          $ref: '#/components/responses/InvalidQuery'
+          description: A query parameter is unknown or out of range (`invalid_query`), or the chain or `kind` is not valid (`invalid_id`).
+        "404":
+          $ref: '#/components/responses/NotFound'
+          description: The chain is well formed but is neither `eip155:143` nor `eip155:8453` (`unsupported_chain`), or the path is not a route (`not_found`).
+        "499": {$ref: '#/components/responses/ClientClosed'}
+        "500": {$ref: '#/components/responses/Internal'}
+        "503":
+          $ref: '#/components/responses/Unavailable'
+          description: The indexer is not initialised, the engine has copied no rows yet, or the database did not answer. Retry after the `Retry-After` of 1 s.
+        "504":
+          $ref: '#/components/responses/DeadlineExceeded'
+  /internal/v1/chains/{chain}/x402/{kind}/{id}/daily:
+    parameters:
+      - $ref: '#/components/parameters/Chain'
+      - $ref: '#/components/parameters/Kind'
+      - $ref: '#/components/parameters/EntityId'
+    get:
+      operationId: getEntityDaily
+      tags: [Daily]
+      summary: Get one facilitator, seller or payer day by day
+      description: |
+        Call this to draw the activity of one entity over time. `kind` is `facilitators`, `sellers` or `payers`, and `id` is a registry id, a relayer address or `unknown` for a facilitator, and an address for a seller or a payer. An address is accepted in any case.
+
+        The window and `tier` work as on the leaderboards: `from` and `to` are inclusive UTC days, the default is the 30 days that end on the day of the watermark, the span is 366 days at most, and `tier` is `A` (the default) or `AB`. The items come in ascending order of day, and a day with both tiers has one item for each.
+
+        An item holds the day, the tier, and the raw and genuine counts and volumes of that day. Only the figures that make sense for the entity are there:
+
+        - a facilitator day has `raw_payers`, `raw_sellers` and `gas_cost`;
+        - a seller day has `raw_payers`;
+        - a payer day has `raw_sellers`.
+
+        `raw_payers` and `raw_sellers` count the distinct addresses of that day. A day without any payment has no item. An entity that exists but has no payment in the window answers 200 with empty `items`. An entity with no payment at all answers 404 `not_found`.
+
+        Errors: 400 `invalid_id` for a `kind` that is none of the three or an `id` that is malformed, 400 `invalid_query` for a bad parameter, 404 `not_found` for an unknown entity, 503 `upstream_unavailable` until the engine has copied its first rows, and 504 `deadline_exceeded` when the budget runs out.
+      parameters:
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/BoardTier'
+        - $ref: '#/components/parameters/DeadlineMs'
+      responses:
+        "200":
+          description: The entity is known. The body holds its days in the window, which can be none. The `Sona-*` headers describe the watermark.
+          headers: *dataHeaders
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Daily'}
+              examples:
+                facilitator:
+                  summary: Two days of a facilitator (example numbers)
+                  value: {"kind": "x402_daily", "chain": "eip155:143", "entity": "facilitators", "id": "monad-foundation", "from": "2026-10-11", "to": "2026-10-12", "tier": "A", "items": [{"day": "2026-10-11", "tier": "A", "raw_payments": 1518, "raw_volume": "151800", "genuine_payments": 0, "genuine_volume": "0", "raw_payers": 56, "raw_sellers": 1, "gas_cost": "22804364000000000000"}, {"day": "2026-10-12", "tier": "A", "raw_payments": 41, "raw_volume": "4100", "genuine_payments": 41, "genuine_volume": "4100", "raw_payers": 12, "raw_sellers": 3, "gas_cost": "615900000000000000"}]}
+                seller:
+                  summary: A seller day, which carries the number of payers and no number of sellers (example numbers)
+                  value: {"kind": "x402_daily", "chain": "eip155:143", "entity": "sellers", "id": "0x1995159c8d4df2268a17c0169a80f0e7d11a7424", "from": "2026-10-11", "to": "2026-10-11", "tier": "A", "items": [{"day": "2026-10-11", "tier": "A", "raw_payments": 1518, "raw_volume": "151800", "genuine_payments": 0, "genuine_volume": "0", "raw_payers": 56}]}
+        "400":
+          $ref: '#/components/responses/InvalidId'
+          description: The `kind` or the `id` is not valid (`invalid_id`), or a query parameter is unknown or out of range (`invalid_query`).
+        "404":
+          $ref: '#/components/responses/NotFound'
+          description: No payment was ever recorded for this entity (`not_found`), the chain is well formed but is neither `eip155:143` nor `eip155:8453` (`unsupported_chain`), or the path is not a route.
+        "499": {$ref: '#/components/responses/ClientClosed'}
+        "500": {$ref: '#/components/responses/Internal'}
+        "503":
+          $ref: '#/components/responses/Unavailable'
+          description: The indexer is not initialised, the engine has copied no rows yet, or the database did not answer. Retry after the `Retry-After` of 1 s.
+        "504":
+          $ref: '#/components/responses/DeadlineExceeded'
+  /internal/v1/chains/{chain}/x402/flows:
+    parameters:
+      - $ref: '#/components/parameters/Chain'
+    get:
+      operationId: listFlows
+      tags: [Leaderboards]
+      summary: Rank the facilitator to payee flows over a window
+      description: |
+        Call this to see which facilitator settles for which seller. Each item is one pair of a facilitator and a payee in one tier, summed over the window. The route adds up the daily flow rows, so it is quick whatever the number of payments, and on Base it still counts the days whose payment rows were pruned.
+
+        The window, `tier`, `order` and `limit` work as on the leaderboards: `from` and `to` are inclusive UTC days, the default is the 30 days that end on the day of the watermark, the span is 90 days at most, `tier` is `A` (the default) or `AB`, `order` is `genuine_volume` (the default), `raw_volume`, `genuine_payments` or `raw_payments`, and `limit` is 1 to 100, 25 by default. Ties are ordered by facilitator, payee and tier. The flow rows hold tiers A and B only.
+
+        An item holds the `facilitator` (a registry id, or the lowercase relayer address of an unlisted relayer), its registry `name` (null when unlisted), the `payee`, the `tier`, the raw and genuine payment counts, and the raw and genuine USDC volumes as amounts with `raw` base units, `decimals` and a decimal `value`. The `window` of the body is the one the service resolved.
+
+        A window without any payment is not an error: the answer is 200 with empty `items`.
+
+        Errors: 400 `invalid_query` for an unknown parameter, a bad day, `from` after `to`, a window over 90 days, or a bad `tier`, `order` or `limit`. 503 `upstream_unavailable` until the engine has copied its first rows, and 504 `deadline_exceeded` when the budget runs out.
+      parameters:
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/BoardTier'
+        - $ref: '#/components/parameters/Order'
+        - $ref: '#/components/parameters/BoardLimit'
+        - $ref: '#/components/parameters/DeadlineMs'
+      responses:
+        "200":
+          description: The body is the ranking. The `Sona-*` headers describe the watermark.
+          headers: *dataHeaders
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Flows'}
+              examples:
+                flows:
+                  summary: The biggest flow of tier A by genuine volume (example numbers)
+                  value: {"kind": "x402_flows", "window": {"from": "2026-09-13", "to": "2026-10-12"}, "items": [{"facilitator": "monad-foundation", "name": "Molandak", "payee": "0x1995159c8d4df2268a17c0169a80f0e7d11a7424", "tier": "A", "raw_payments": 410862, "raw_volume": {"raw": "41086200", "decimals": 6, "value": "41.0862"}, "genuine_payments": 0, "genuine_volume": {"raw": "0", "decimals": 6, "value": "0"}}]}
+        "400":
+          $ref: '#/components/responses/InvalidQuery'
+          description: A query parameter is unknown or out of range (`invalid_query`), or the chain is not valid (`invalid_id`).
+        "404":
+          $ref: '#/components/responses/NotFound'
+          description: The chain is well formed but is neither `eip155:143` nor `eip155:8453` (`unsupported_chain`), or the path is not a route (`not_found`).
+        "499": {$ref: '#/components/responses/ClientClosed'}
+        "500": {$ref: '#/components/responses/Internal'}
+        "503":
+          $ref: '#/components/responses/Unavailable'
+          description: The indexer is not initialised, the engine has copied no rows yet, or the database did not answer. Retry after the `Retry-After` of 1 s.
+        "504":
+          $ref: '#/components/responses/DeadlineExceeded'
+  /internal/v1/chains/{chain}/x402/rules/daily:
+    parameters:
+      - $ref: '#/components/parameters/Chain'
+    get:
+      operationId: listRulesDaily
+      tags: [Daily]
+      summary: Count the payments each genuine-volume signal fired for, day by day
+      description: |
+        Call this to see how often each signal in the table of this document fired on each day. An item is a day, a signal, `count`, the number of tier A and B payments it fired for, and `payments`, the number of tier A and B payments checked on that day. A payment can fire several signals, so the counts of one day do not add up to its payments. A day on which a signal fired for no payment has no item for it. The `rule` is one of `fixed_amount`, `payee_concentration`, `no_other_activity`, `bridge_funded` and `self_payment`.
+
+        The window works as on `/flows`: `from` and `to` are inclusive UTC days, the default is the 30 days that end on the day of the watermark, the span is 366 days at most and `to` is not before `from`. The items come in ascending order of day and then of rule. On Base the days whose payment rows were pruned keep their counts.
+
+        Errors: 400 `invalid_query` for an unknown parameter, a bad day, `from` after `to` or a window over 366 days. 503 `upstream_unavailable` until the engine has copied its first rows, and 504 `deadline_exceeded` when the budget runs out.
+      parameters:
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/DeadlineMs'
+      responses:
+        "200":
+          description: The body holds the counts of the window, which can be none. The `Sona-*` headers describe the watermark.
+          headers: *dataHeaders
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RulesDaily'}
+              examples:
+                rules:
+                  summary: Two signals on one day (example numbers)
+                  value: {"kind": "x402_rules_daily", "window": {"from": "2026-10-11", "to": "2026-10-12"}, "items": [{"day": "2026-10-11", "rule": "fixed_amount", "count": 1518, "payments": 1560}, {"day": "2026-10-11", "rule": "no_other_activity", "count": 1518, "payments": 1560}]}
+        "400":
+          $ref: '#/components/responses/InvalidQuery'
+          description: A query parameter is unknown or out of range (`invalid_query`), or the chain is not valid (`invalid_id`).
+        "404":
+          $ref: '#/components/responses/NotFound'
+          description: The chain is well formed but is neither `eip155:143` nor `eip155:8453` (`unsupported_chain`), or the path is not a route (`not_found`).
+        "499": {$ref: '#/components/responses/ClientClosed'}
+        "500": {$ref: '#/components/responses/Internal'}
+        "503":
+          $ref: '#/components/responses/Unavailable'
+          description: The indexer is not initialised, the engine has copied no rows yet, or the database did not answer. Retry after the `Retry-After` of 1 s.
+        "504":
+          $ref: '#/components/responses/DeadlineExceeded'
+  /internal/v1/chains/{chain}/x402/payments:
+    parameters:
+      - $ref: '#/components/parameters/Chain'
+    get:
+      operationId: listPayments
+      tags: [Payments]
+      summary: List payments, newest first
+      description: |
+        Call this to see single payments. The list is ordered by block and log index, newest first, and a log index is unique inside a block. The filters `payer`, `payee`, `relayer`, `facilitator`, `method`, `tier`, `from` and `to` narrow it, and they combine with AND. `tier` is `A` by default, `AB` adds the payments of unlisted relayers, and `all` adds tier X. `from` and `to` are inclusive UTC days of the block time and have no limit on the span.
+
+        A page holds `limit` payments, 50 by default and 200 at most. When more are left, the body has a `next_cursor`. Pass it back as `cursor`, with the same filters, to get the next page. The cursor is `<block>.<log_index>` of the last payment of the page, and a page starts right after it. The last page has no `next_cursor`. The cursor is stable: payments that arrive later are newer and never move an older page.
+
+        A payment holds every key of the `Payment` schema, with `null` for what is not known, so a client can rely on the keys. A row that only carries a hash has nulls in the decoded fields. Amounts are decimal strings, because the amount of a payment can have 78 digits. The payment `id` is `143_<block>_<log_index>`. `genuine` and `rules_fired` are explained in the description of this document.
+
+        Errors: 400 `invalid_query` for an unknown parameter, a bad day, `from` after `to`, a bad `limit`, `tier`, `method` or `cursor`, and 400 `invalid_id` for a malformed `payer`, `payee`, `relayer` or `facilitator`. 503 `upstream_unavailable` until the engine has copied its first rows, and 504 `deadline_exceeded` when the budget runs out.
+      parameters:
+        - $ref: '#/components/parameters/Payer'
+        - $ref: '#/components/parameters/Payee'
+        - $ref: '#/components/parameters/Relayer'
+        - $ref: '#/components/parameters/Facilitator'
+        - $ref: '#/components/parameters/Method'
+        - $ref: '#/components/parameters/PaymentTier'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/PaymentLimit'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/DeadlineMs'
+      responses:
+        "200":
+          description: The body is one page of payments, which can be empty. The `Sona-*` headers describe the watermark.
+          headers: *dataHeaders
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Payments'}
+              examples:
+                first_molandak_call:
+                  summary: The first payment ever settled by the Monad Foundation facilitator, a direct EIP-3009 transfer
+                  value: {"kind": "x402_payments", "chain": "eip155:143", "items": [{"id": "143_52996376_25", "chain": "eip155:143", "block": 52996376, "block_time": "2026-02-03T16:26:44Z", "tx": "0xdfab5948beeb75ea2bfa333df9a8a5487a831b7c94cb9c041a9a117ccf55fd25", "log_index": 25, "method": "eip3009_transfer", "token": "0x754704bc059f8c67012fed69bc8a327a5aafb603", "payer": "0x6ed016cbb38dc24f74337f8029efa9abbab0fb17", "payee": "0x3deff9096a99515e81f9f35f940e52a0e5fc4407", "amount": "1000", "nonce": "0xe454a124f1e90e11b4551676a90d5258c3e67fda724068e54d04c8ef0ecee546", "valid_after": "0", "valid_before": "1770139603", "relayer": "0x7f6a2850669202519f0fe8aa912451238820db86", "tx_to": "0x754704bc059f8c67012fed69bc8a327a5aafb603", "selector": "0xe3ee160e", "gas_cost": "17629595283900000", "tier": "A", "facilitator": "monad-foundation", "reason": null, "genuine": true, "rules_fired": []}]}
+                burst_payment:
+                  summary: A payment of a burst, 100 units to a single payee, and a next page
+                  value: {"kind": "x402_payments", "chain": "eip155:143", "items": [{"id": "143_101000000_35", "chain": "eip155:143", "block": 101000000, "block_time": "2026-09-01T08:56:14Z", "tx": "0x89f2eb1aebd2bff647aebf05eecef078021432b6fcf956b33ad45f47bdd8b25c", "log_index": 35, "method": "eip3009_transfer", "token": "0x754704bc059f8c67012fed69bc8a327a5aafb603", "payer": "0x648b2d6487e86bab067eb3ecdde5ff00a13a671f", "payee": "0x1995159c8d4df2268a17c0169a80f0e7d11a7424", "amount": "100", "nonce": "0x49ea92279f18c031cfe673a3a11f5234edb7d7d287c4b5293190107f7e586e05", "valid_after": "0", "valid_before": "1788253273", "relayer": "0x7f6a2850669202519f0fe8aa912451238820db86", "tx_to": "0x754704bc059f8c67012fed69bc8a327a5aafb603", "selector": "0xe3ee160e", "gas_cost": "15856410000155455", "tier": "A", "facilitator": "monad-foundation", "reason": null, "genuine": false, "rules_fired": ["fixed_amount", "payee_concentration", "no_other_activity"]}], "next_cursor": "101000000.35"}
+                routed_call:
+                  summary: A call routed through another contract, which is tier X and has no decoded payee or amount
+                  value: {"kind": "x402_payments", "chain": "eip155:143", "items": [{"id": "143_76900022_14", "chain": "eip155:143", "block": 76900022, "block_time": "2026-05-25T11:22:29Z", "tx": "0x4443a79d069bbb50bbf2118321a344ac00d8416d4dfce63cc177a20ca44aee5a", "log_index": 14, "method": "other", "token": "0x754704bc059f8c67012fed69bc8a327a5aafb603", "payer": "0x76c7294829457c93cd3757719359f3c832143bc8", "payee": null, "amount": null, "nonce": "0xc86ada23d13d787549ef55ad74283931e0e913e2316451d9635d15a3f88b1a3f", "valid_after": null, "valid_before": null, "relayer": "0xec917b93a20ddc3017b01494802699d1596571ba", "tx_to": "0xce71bb7db465378db1271c97eaa518ca37e4a85b", "selector": "0xbc28300c", "gas_cost": "34763334000340817", "tier": "X", "facilitator": null, "reason": "not_x402", "genuine": null, "rules_fired": []}]}
+        "400":
+          $ref: '#/components/responses/InvalidQuery'
+          description: A query parameter is unknown or out of range (`invalid_query`), or the chain or an address or facilitator filter is not valid (`invalid_id`).
+        "404":
+          $ref: '#/components/responses/NotFound'
+          description: The chain is well formed but is neither `eip155:143` nor `eip155:8453` (`unsupported_chain`), or the path is not a route (`not_found`).
+        "499": {$ref: '#/components/responses/ClientClosed'}
+        "500": {$ref: '#/components/responses/Internal'}
+        "503":
+          $ref: '#/components/responses/Unavailable'
+          description: The indexer is not initialised, the engine has copied no rows yet, or the database did not answer. Retry after the `Retry-After` of 1 s.
+        "504":
+          $ref: '#/components/responses/DeadlineExceeded'
+  /internal/v1/chains/{chain}/x402/payments/{tx}:
+    parameters:
+      - $ref: '#/components/parameters/Chain'
+      - $ref: '#/components/parameters/Tx'
+    get:
+      operationId: getTxPayments
+      tags: [Payments]
+      summary: Get every payment of one transaction
+      description: |
+        Call this to see what a transaction paid. One transaction can settle several payments, so the body lists all of them in log order. A payment of any tier is returned, tier X included, because the transaction is asked for by name.
+
+        The `tx` is `0x` and 64 hex digits in any case. The answer uses the lowercase form. Only payments up to the watermark are served, so a transaction that is newer than the watermark answers 404 even when the indexer already has it. Ask again after the next refresh.
+
+        Errors: 400 `invalid_id` for a hash that is malformed, 404 `not_found` when no payment up to the watermark belongs to the hash, 503 `upstream_unavailable` until the engine has copied its first rows, and 504 `deadline_exceeded` when the budget runs out.
+      parameters:
+        - $ref: '#/components/parameters/DeadlineMs'
+      responses:
+        "200":
+          description: At least one payment belongs to the transaction. The `Sona-*` headers describe the watermark.
+          headers: *dataHeaders
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TxPayments'}
+              examples:
+                first_molandak_call:
+                  summary: The transaction of the first Monad Foundation payment
+                  value: {"kind": "x402_tx", "chain": "eip155:143", "tx": "0xdfab5948beeb75ea2bfa333df9a8a5487a831b7c94cb9c041a9a117ccf55fd25", "items": [{"id": "143_52996376_25", "chain": "eip155:143", "block": 52996376, "block_time": "2026-02-03T16:26:44Z", "tx": "0xdfab5948beeb75ea2bfa333df9a8a5487a831b7c94cb9c041a9a117ccf55fd25", "log_index": 25, "method": "eip3009_transfer", "token": "0x754704bc059f8c67012fed69bc8a327a5aafb603", "payer": "0x6ed016cbb38dc24f74337f8029efa9abbab0fb17", "payee": "0x3deff9096a99515e81f9f35f940e52a0e5fc4407", "amount": "1000", "nonce": "0xe454a124f1e90e11b4551676a90d5258c3e67fda724068e54d04c8ef0ecee546", "valid_after": "0", "valid_before": "1770139603", "relayer": "0x7f6a2850669202519f0fe8aa912451238820db86", "tx_to": "0x754704bc059f8c67012fed69bc8a327a5aafb603", "selector": "0xe3ee160e", "gas_cost": "17629595283900000", "tier": "A", "facilitator": "monad-foundation", "reason": null, "genuine": true, "rules_fired": []}]}
+        "400":
+          $ref: '#/components/responses/InvalidId'
+          description: The `tx` is not `0x` followed by 64 hex digits, or the chain is not a CAIP-2 id (`invalid_id`), or the request has a query parameter (`invalid_query`). This route takes none.
+        "404":
+          $ref: '#/components/responses/NotFound'
+          description: No payment up to the watermark belongs to this hash (`not_found`), the chain is well formed but is neither `eip155:143` nor `eip155:8453` (`unsupported_chain`), or the path is not a route.
+        "499": {$ref: '#/components/responses/ClientClosed'}
+        "500": {$ref: '#/components/responses/Internal'}
+        "503":
+          $ref: '#/components/responses/Unavailable'
+          description: The indexer is not initialised, the engine has copied no rows yet, or the database did not answer. Retry after the `Retry-After` of 1 s.
+        "504":
+          $ref: '#/components/responses/DeadlineExceeded'
+  /healthz:
+    get:
+      operationId: getHealth
+      tags: [Operations]
+      summary: Check that the process is alive
+      description: |
+        The liveness probe. It answers 200 with an empty body as long as the process runs, whether or not the database is reachable. It sends no `X-Request-Id` and no `Sona-*` header.
+      responses:
+        "200": {description: The process is running. The body is empty.}
+  /readyz:
+    get:
+      operationId: getReady
+      tags: [Operations]
+      summary: Check that the service can answer requests
+      description: |
+        The readiness probe. It answers 200 once the database answers and one refresh has finished, even a refresh that found the indexer not initialised. It answers 503 before that, with an empty body: unlike the data routes, a 503 here has no problem body and no `Retry-After`. This is the check behind the container's Docker health check. It sends no `X-Request-Id`.
+      responses:
+        "200": {description: The first refresh has finished. The body is empty.}
+        "503": {description: No refresh has finished yet. The body is empty.}
+components:
+  parameters:
+    Chain:
+      name: chain
+      in: path
+      required: true
+      description: |
+        The chain, as a CAIP-2 id. Only `eip155:143` (Monad) and `eip155:8453` (Base) are served. A well-formed id of another chain answers 404 `unsupported_chain`, and an id that is not CAIP-2 shaped answers 400 `invalid_id`. It is part of the path, so there is no default.
+      schema:
+        type: string
+        pattern: '^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}$'
+      examples:
+        monad: {summary: Monad, value: "eip155:143"}
+        base: {summary: Base, value: "eip155:8453"}
+    Kind:
+      name: kind
+      in: path
+      required: true
+      description: |
+        Which entity to rank or to read. `facilitators` are the ones who settle (the tier A registry ids, and the relayers of tier B), `sellers` are the addresses that were paid (the payee) and `payers` are the addresses that paid. Any other word answers 400 `invalid_id`. It is part of the path, so there is no default.
+      schema: {type: string, enum: [facilitators, sellers, payers]}
+      examples:
+        facilitators: {summary: Facilitators, value: facilitators}
+        sellers: {summary: Sellers, value: sellers}
+        payers: {summary: Payers, value: payers}
+    EntityId:
+      name: id
+      in: path
+      required: true
+      description: |
+        The entity to read. For `facilitators` it is a registry id such as `monad-foundation` (read the ids at `/registry`), a relayer address, or `unknown` for payments that have no relayer. For `sellers` and `payers` it is an address. An address is `0x` and 40 hex digits in any case, without a checksum check. Anything else answers 400 `invalid_id`. It is part of the path, so there is no default.
+      schema:
+        type: string
+        pattern: '^(0x[0-9a-fA-F]{40}|[a-z0-9][a-z0-9-]*)$'
+      examples:
+        facilitator: {summary: The Monad Foundation facilitator, value: monad-foundation}
+        seller: {summary: A seller, value: "0x1995159c8d4df2268a17c0169a80f0e7d11a7424"}
+    Tx:
+      name: tx
+      in: path
+      required: true
+      description: |
+        The transaction hash: `0x` followed by 64 hex digits, in upper or lower case. It is part of the path, so there is no default.
+      schema: {$ref: '#/components/schemas/HashAnyCase'}
+      examples:
+        first_molandak_call: {summary: The first payment of the Monad Foundation facilitator, value: "0xdfab5948beeb75ea2bfa333df9a8a5487a831b7c94cb9c041a9a117ccf55fd25"}
+    From:
+      name: from
+      in: query
+      required: false
+      description: |
+        The first UTC day of the window, `YYYY-MM-DD` and inclusive. On the leaderboards and the daily rows, without `from` the window starts 29 days before `to`, and it spans 366 days at most. On the payments it filters by the day of the block time, and without `from` the list has no start.
+      schema: {$ref: '#/components/schemas/Day'}
+      examples:
+        day: {summary: A day, value: "2026-10-01"}
+    To:
+      name: to
+      in: query
+      required: false
+      description: |
+        The last UTC day of the window, `YYYY-MM-DD` and inclusive. Without `to` the window ends on the day of the watermark on the leaderboards and the daily rows, and the list has no end on the payments.
+      schema: {$ref: '#/components/schemas/Day'}
+      examples:
+        day: {summary: A day, value: "2026-10-12"}
+    BoardTier:
+      name: tier
+      in: query
+      required: false
+      description: |
+        Which tiers to count. `A` (the default) is the listed facilitators, `AB` adds the unlisted relayers of tier B. The daily numbers hold tiers A and B only.
+      schema: {type: string, enum: [A, AB], default: A}
+    PaymentTier:
+      name: tier
+      in: query
+      required: false
+      description: |
+        Which tiers to list. `A` (the default) is the listed facilitators, `AB` adds the unlisted relayers of tier B, and `all` adds tier X, the rows that are not x402 payments.
+      schema: {type: string, enum: [A, AB, all], default: A}
+    Order:
+      name: order
+      in: query
+      required: false
+      description: |
+        The figure to rank by, highest first: `genuine_volume` (the default), `raw_volume`, `genuine_payments` or `raw_payments`. Ties are ordered by id.
+      schema: {type: string, enum: [genuine_volume, raw_volume, genuine_payments, raw_payments], default: genuine_volume}
+    BoardLimit:
+      name: limit
+      in: query
+      required: false
+      description: |
+        The most items to return, from 1 to 100. The default is 25.
+      schema: {type: integer, minimum: 1, maximum: 100, default: 25}
+    PaymentLimit:
+      name: limit
+      in: query
+      required: false
+      description: |
+        The most payments to return in one page, from 1 to 200. The default is 50.
+      schema: {type: integer, minimum: 1, maximum: 200, default: 50}
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: |
+        The `next_cursor` of the previous page, `<block>.<log_index>`. Send the same filters again. Without a cursor the list starts at the newest payment.
+      schema: {$ref: '#/components/schemas/Cursor'}
+    Payer:
+      name: payer
+      in: query
+      required: false
+      description: |
+        Only payments from this payer, an address of `0x` and 40 hex digits in any case.
+      schema: {$ref: '#/components/schemas/AddressAnyCase'}
+    Payee:
+      name: payee
+      in: query
+      required: false
+      description: |
+        Only payments to this payee (the seller), an address of `0x` and 40 hex digits in any case.
+      schema: {$ref: '#/components/schemas/AddressAnyCase'}
+    Relayer:
+      name: relayer
+      in: query
+      required: false
+      description: |
+        Only payments settled by this relayer, an address of `0x` and 40 hex digits in any case.
+      schema: {$ref: '#/components/schemas/AddressAnyCase'}
+    Facilitator:
+      name: facilitator
+      in: query
+      required: false
+      description: |
+        Only payments of this facilitator: a registry id such as `monad-foundation`, the address of an unlisted relayer (tier B), or `unknown` for payments without a relayer. Any other word answers 400 `invalid_id`.
+      schema:
+        type: string
+        pattern: '^(0x[0-9a-fA-F]{40}|[a-z0-9][a-z0-9-]*)$'
+    Method:
+      name: method
+      in: query
+      required: false
+      description: |
+        Only payments of this method. A direct EIP-3009 call is `eip3009_transfer` or `eip3009_receive`, a Permit2 proxy settlement is `permit2_exact` or `permit2_upto`, a deposit of the batch scheme is `batch_deposit`, and `other` is every call that was routed through another contract.
+      schema: {$ref: '#/components/schemas/Method'}
+    DeadlineMs:
+      name: Sona-Deadline-Ms
+      in: header
+      required: false
+      description: |
+        The most time, in milliseconds, that this call may take. The default is 5000, used when the header is absent or is not a whole number (`abc` and `1.5` are ignored). When the time runs out before the database has answered, the call ends with 504 `deadline_exceeded`. A value of 0 or less answers 504 straight away without reading anything. The HTTP server's own write timeout is 10 s, so a budget above 10000 cannot be used in full. `sona-api` fills this header in itself with the time it has left.
+      schema: {type: integer, format: int64}
+      examples:
+        default: {summary: The default budget of 5 s, value: 5000}
+        short: {summary: Wait at most 400 ms, value: 400}
+  headers:
+    SonaFinality:
+      description: |
+        How settled the data is. It is always `finalized` here, because every served row is at least 10 blocks behind the newest block the indexer has processed. It is present on every successful leaderboard, daily, payments and transaction answer, and absent from the status and registry answers, from errors and from the probes.
+      required: true
+      schema: {type: string, enum: [finalized]}
+      example: finalized
+    SonaBlock:
+      description: |
+        The watermark block: the newest block the engine has copied, as a decimal integer. No served row is above it. It is absent from every answer that is not a successful leaderboard, daily, payments or transaction answer.
+      required: true
+      schema: {type: integer, minimum: 0}
+      example: 112740988
+    SonaBlockTime:
+      description: |
+        The time of the indexer's progress block as Unix time in whole seconds (UTC), for example `1791804606`, which is 2026-10-12T11:30:06Z. It is not the time of the watermark block, because the stored rows hold no block times to look up. It is absent whenever `Sona-Block` is absent, and also when the indexer has not reported a block time.
+      schema: {type: integer, minimum: 1}
+      example: 1791804606
+    RequestId:
+      description: A 32-character hex ID that identifies this one request in the service log. It is the trace ID of the incoming `traceparent` header, or a random one. Quote it when you report a problem. It is present on every answer except `/healthz` and `/readyz`.
+      schema: {type: string, pattern: '^[0-9a-f]{32}$', examples: [4bf92f3577b34da6a3ce929d0e0e4736]}
+    RetryAfter:
+      description: How many whole seconds to wait before you send the request again. It is 1 on every 503 with a problem body.
+      required: true
+      schema: {type: integer, enum: [1]}
+    NoStore:
+      description: |
+        Always `no-store` on an error answer. It tells caches not to keep a problem, because the same request may succeed a moment later. Successful answers carry no `Cache-Control`.
+      required: true
+      schema: {type: string, enum: [no-store]}
+  responses:
+    InvalidQuery:
+      description: A query parameter is not accepted (`invalid_query`), or the chain in the path is not a CAIP-2 id (`invalid_id`). Each route says which parameters it takes.
+      headers: &problemHeaders
+        Cache-Control: {$ref: '#/components/headers/NoStore'}
+        X-Request-Id: {$ref: '#/components/headers/RequestId'}
+      content:
+        application/problem+json:
+          schema: {allOf: [{$ref: '#/components/schemas/Problem'}, {properties: {code: {enum: [invalid_query, invalid_id]}}}]}
+          examples:
+            limit:
+              summary: A limit out of range
+              value: {"type": "urn:sona:problem:invalid_query", "title": "Invalid query", "status": 400, "detail": "limit is a whole number from 1 to 200.", "instance": "/internal/v1/chains/eip155:143/x402/payments", "code": "invalid_query"}
+    InvalidId:
+      description: An identifier is not valid (`invalid_id`), that is the chain, the `kind`, the `id` of an entity or a transaction hash. A query parameter that is not accepted answers `invalid_query` instead.
+      headers: *problemHeaders
+      content:
+        application/problem+json:
+          schema: {allOf: [{$ref: '#/components/schemas/Problem'}, {properties: {code: {enum: [invalid_id, invalid_query]}}}]}
+          examples:
+            tx:
+              summary: A transaction hash that is too short
+              value: {"type": "urn:sona:problem:invalid_id", "title": "Invalid identifier", "status": 400, "detail": "A transaction hash is 0x and 64 hex digits.", "instance": "/internal/v1/chains/eip155:143/x402/payments/0x12", "code": "invalid_id"}
+    NotFound:
+      description: Nothing is there (`not_found`). That is a transaction or an entity without payments, and also a path or method that no route serves, which has the detail `No such route.`. The code `unsupported_chain` shares the status for a well-formed chain other than `eip155:143` and `eip155:8453`.
+      headers: *problemHeaders
+      content:
+        application/problem+json:
+          schema: {allOf: [{$ref: '#/components/schemas/Problem'}, {properties: {code: {enum: [not_found, unsupported_chain]}}}]}
+          examples:
+            unknown_route:
+              summary: A path that no route serves
+              value: {"type": "urn:sona:problem:not_found", "title": "Not found", "status": 404, "detail": "No such route.", "instance": "/nope", "code": "not_found"}
+            unsupported_chain:
+              summary: Another chain
+              value: {"type": "urn:sona:problem:unsupported_chain", "title": "Unsupported chain", "status": 404, "detail": "Only eip155:143 is served.", "instance": "/internal/v1/chains/eip155:1/x402/status", "code": "unsupported_chain"}
+    Internal:
+      description: The service failed in a way it has no name for (`internal`). The usual cause is a database statement that the server rejected. It is not worth retrying until the cause is fixed. Report the `X-Request-Id`, because the cause is in the service log under that ID.
+      headers: *problemHeaders
+      content:
+        application/problem+json:
+          schema: {allOf: [{$ref: '#/components/schemas/Problem'}, {properties: {code: {enum: [internal]}}}]}
+    Unavailable:
+      description: The service has no data to answer with right now (`upstream_unavailable`). Either the indexer has not created its tables or the engine has not copied its first rows, or the database did not answer. This is usually short-lived, so retry. `Retry-After` and `retry_after_s` are both 1 (second).
+      headers:
+        Cache-Control: {$ref: '#/components/headers/NoStore'}
+        Retry-After: {$ref: '#/components/headers/RetryAfter'}
+        X-Request-Id: {$ref: '#/components/headers/RequestId'}
+      content:
+        application/problem+json:
+          schema: {allOf: [{$ref: '#/components/schemas/Problem'}, {properties: {code: {enum: [upstream_unavailable]}}}]}
+          examples:
+            no_data:
+              summary: The indexer has produced no data yet
+              value: {"type": "urn:sona:problem:upstream_unavailable", "title": "Data source unavailable", "status": 503, "detail": "The indexer has produced no data yet.", "instance": "/internal/v1/chains/eip155:143/x402/payments", "code": "upstream_unavailable", "retry_after_s": 1}
+    DeadlineExceeded:
+      description: The time budget ran out (`deadline_exceeded`). Either the database had not answered within `Sona-Deadline-Ms` (5000 ms when the header is absent), or the header was 0 or less. Retry, with a larger budget if the call is a slow one.
+      headers: *problemHeaders
+      content:
+        application/problem+json:
+          schema: {allOf: [{$ref: '#/components/schemas/Problem'}, {properties: {code: {enum: [deadline_exceeded]}}}]}
+    ClientClosed:
+      description: The caller closed the connection before the answer was ready. The status is the one nginx uses for that, and the body is empty. A real caller never sees it, because it has already gone. It only shows in the service's request metrics.
+      headers:
+        X-Request-Id: {$ref: '#/components/headers/RequestId'}
+  schemas:
+    Problem:
+      description: An error in the RFC 9457 `application/problem+json` format. Switch on `code`. The text fields are for people.
+      type: object
+      additionalProperties: false
+      required: [type, title, status, code]
+      properties:
+        type:
+          type: string
+          description: A URN that identifies the kind of error, `urn:sona:problem:` followed by the `code`.
+          examples: ["urn:sona:problem:not_found"]
+        title:
+          type: string
+          description: A short, fixed, human-readable name for the kind of error.
+          examples: [Not found]
+        status:
+          type: integer
+          description: The HTTP status code of the answer, repeated in the body.
+          examples: [404]
+        detail:
+          type: string
+          description: A sentence explaining what went wrong for this request. The wording may change, so do not parse it.
+          examples: [No payment was recorded for this transaction.]
+        instance:
+          type: string
+          description: The path of the request that failed.
+          examples: ["/internal/v1/chains/eip155:143/x402/payments/0x12"]
+        code:
+          type: string
+          description: |
+            The stable machine-readable reason. `invalid_query` a query parameter is not accepted. `invalid_id` an identifier is malformed. `unsupported_chain` the chain is not served. `not_found` nothing is there. `internal` an unexpected failure. `upstream_unavailable` the service has no data to answer with. `deadline_exceeded` it was too slow.
+          enum: [invalid_query, invalid_id, unsupported_chain, not_found, internal, upstream_unavailable, deadline_exceeded]
+        retry_after_s:
+          type: integer
+          description: How many seconds to wait before a retry. Only on 503, where it is 1.
+          examples: [1]
+    Address:
+      type: string
+      description: A 20-byte address written as `0x` followed by 40 lowercase hex digits.
+      pattern: '^0x[0-9a-f]{40}$'
+      examples: ["0x7f6a2850669202519f0fe8aa912451238820db86"]
+    AddressAnyCase:
+      type: string
+      description: A 20-byte address written as `0x` followed by 40 hex digits in any case. A mixed-case address is not checked against its EIP-55 checksum.
+      pattern: '^0x[0-9a-fA-F]{40}$'
+      examples: ["0x7F6A2850669202519f0fe8aa912451238820dB86"]
+    Hash:
+      type: string
+      description: A 32-byte hash written as `0x` followed by 64 lowercase hex digits.
+      pattern: '^0x[0-9a-f]{64}$'
+      examples: ["0xdfab5948beeb75ea2bfa333df9a8a5487a831b7c94cb9c041a9a117ccf55fd25"]
+    HashAnyCase:
+      type: string
+      description: A 32-byte hash written as `0x` followed by 64 hex digits in any case. The service uses the lowercase form.
+      pattern: '^0x[0-9a-fA-F]{64}$'
+      examples: ["0xdfab5948beeb75ea2bfa333df9a8a5487a831b7c94cb9c041a9a117ccf55fd25"]
+    Day:
+      type: string
+      format: date
+      description: A UTC day written `YYYY-MM-DD`, with the month and the day padded to two digits.
+      pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+      examples: ["2026-10-12"]
+    Amount:
+      type: string
+      description: A whole number of base units as a decimal string, with no sign and no leading zeros. It is a string because it can have up to 78 digits, which no JSON number holds exactly.
+      pattern: '^(0|[1-9][0-9]{0,77})$'
+      examples: ["151800"]
+    Cursor:
+      type: string
+      description: A position in the list of payments, `<block>.<log_index>`, taken from `next_cursor` of the page before.
+      pattern: '^[0-9]+\.[0-9]+$'
+      examples: ["101000000.35"]
+    Method:
+      type: string
+      description: How the payment reached the chain. `eip3009_transfer` and `eip3009_receive` are direct calls of a token's `transferWithAuthorization` and `receiveWithAuthorization`. `permit2_exact` and `permit2_upto` are settlements through the Permit2 proxies of the Exact and Upto schemes. `batch_deposit` is a deposit of the batch scheme. `other` is a call that was routed through another contract, so its payee and amount are not decoded.
+      enum: [eip3009_transfer, eip3009_receive, permit2_exact, permit2_upto, batch_deposit, other]
+    RuleFired:
+      type: string
+      description: A genuine-volume signal. The table in the description of this document says when each one fires.
+      enum: [fixed_amount, payee_concentration, no_other_activity, bridge_funded, self_payment]
+    Payment:
+      description: One payment, which is one `AuthorizationUsed` or Permit2 settlement log of a transaction. Every key is always present, with `null` for what the service does not know.
+      type: object
+      additionalProperties: false
+      required: [id, chain, block, block_time, tx, log_index, method, token, payer, payee, amount, nonce, valid_after, valid_before, relayer, tx_to, selector, gas_cost, tier, facilitator, reason, genuine, rules_fired]
+      properties:
+        id:
+          type: string
+          description: The payment id, `<chain number>_<block>_<log_index>`, such as `143_52996376_25` on Monad and `8453_51234200_3` on Base. The log index counts logs in the whole block.
+          pattern: '^(143|8453)_[0-9]+_[0-9]+$'
+          examples: ["143_52996376_25"]
+        chain:
+          type: string
+          enum: [eip155:143, eip155:8453]
+        block:
+          type: integer
+          description: The number of the block that holds the transaction.
+          minimum: 0
+        block_time:
+          type: string
+          format: date-time
+          description: The time of that block in UTC, RFC 3339. A few blocks share a second, so order by `block` and `log_index`.
+        tx:
+          $ref: '#/components/schemas/Hash'
+        log_index:
+          type: integer
+          minimum: 0
+        method:
+          $ref: '#/components/schemas/Method'
+        token:
+          description: The token that was paid, the contract that emitted the event. Null when the row is known by hash only.
+          anyOf: [{$ref: '#/components/schemas/Address'}, {type: "null"}]
+        payer:
+          description: The payer, who signed the authorization. Null when the row is known by hash only.
+          anyOf: [{$ref: '#/components/schemas/Address'}, {type: "null"}]
+        payee:
+          description: The seller, who received the payment. Null when the call was not decoded (`other`, `batch_deposit`, or calldata that did not fit the method).
+          anyOf: [{$ref: '#/components/schemas/Address'}, {type: "null"}]
+        amount:
+          description: The amount in base units of `token`, as the payment settled it. For the Upto scheme it is the settled amount, not the ceiling. Null when the call was not decoded.
+          anyOf: [{$ref: '#/components/schemas/Amount'}, {type: "null"}]
+        nonce:
+          description: The nonce of the authorization (for Permit2 the permit nonce), `0x` and 64 hex digits.
+          anyOf: [{$ref: '#/components/schemas/Hash'}, {type: "null"}]
+        valid_after:
+          description: The Unix time after which the authorization is valid, as a decimal string. Null when the call was not decoded.
+          anyOf: [{$ref: '#/components/schemas/Amount'}, {type: "null"}]
+        valid_before:
+          description: The Unix time before which the authorization is valid, as a decimal string. For Permit2 it is the deadline of the permit. Null when the call was not decoded.
+          anyOf: [{$ref: '#/components/schemas/Amount'}, {type: "null"}]
+        relayer:
+          description: The address that sent the settling transaction. Null when unknown.
+          anyOf: [{$ref: '#/components/schemas/Address'}, {type: "null"}]
+        tx_to:
+          description: The contract the transaction called. For a direct call it is the token. For a routed call (`other`) it is the router.
+          anyOf: [{$ref: '#/components/schemas/Address'}, {type: "null"}]
+        selector:
+          description: The first 4 bytes of the transaction input, `0x` and 8 hex digits. Null when the input is shorter than 4 bytes.
+          anyOf: [{type: string, pattern: '^0x[0-9a-f]{8}$'}, {type: "null"}]
+        gas_cost:
+          description: The gas limit times the gas price of the transaction, in wei, as a decimal string. Monad bills the limit, so this is what the settlement cost. Null when either is unknown. The cost of a transaction is repeated on each payment it settles.
+          anyOf: [{$ref: '#/components/schemas/Amount'}, {type: "null"}]
+        tier:
+          type: string
+          description: The tier of the payment, explained in the description of this document.
+          enum: [A, B, X]
+        facilitator:
+          description: The registry id for tier A, the lowercase relayer address or `unknown` for tier B, and null for tier X.
+          type: [string, "null"]
+        reason:
+          description: Why a payment is tier X. `not_x402` is a method that is no x402 payment, and `test_relayer` is a payment of a registered test relayer. Null for tier A and B.
+          anyOf: [{type: string, enum: [not_x402, test_relayer]}, {type: "null"}]
+        genuine:
+          description: The verdict of the genuine-volume rules. Null for tier X.
+          type: [boolean, "null"]
+        rules_fired:
+          description: The signals that fired for this payment, in the order of the table in the description of this document. Empty for a payment on which none fired, and for tier X.
+          type: array
+          items: {$ref: '#/components/schemas/RuleFired'}
+    Payments:
+      description: One page of payments.
+      type: object
+      additionalProperties: false
+      required: [kind, chain, items]
+      properties:
+        kind: {type: string, enum: [x402_payments]}
+        chain: {type: string, enum: [eip155:143, eip155:8453]}
+        items:
+          type: array
+          description: The payments, newest first.
+          items: {$ref: '#/components/schemas/Payment'}
+        next_cursor:
+          description: Send it as `cursor` to get the next page. Absent on the last page.
+          allOf: [{$ref: '#/components/schemas/Cursor'}]
+    TxPayments:
+      description: Every payment of one transaction.
+      type: object
+      additionalProperties: false
+      required: [kind, chain, tx, items]
+      properties:
+        kind: {type: string, enum: [x402_tx]}
+        chain: {type: string, enum: [eip155:143, eip155:8453]}
+        tx:
+          description: The transaction hash in lowercase.
+          allOf: [{$ref: '#/components/schemas/Hash'}]
+        items:
+          type: array
+          description: The payments of the transaction in log order, at least one.
+          minItems: 1
+          items: {$ref: '#/components/schemas/Payment'}
+    RawPayments:
+      type: integer
+      description: How many tier A and B payments there are, in any token.
+      minimum: 0
+    RawVolume:
+      description: The USDC volume of those payments in base units (6 decimals). Payments in other tokens add 0.
+      allOf: [{$ref: '#/components/schemas/Amount'}]
+    GenuinePayments:
+      type: integer
+      description: How many of them the rules call genuine.
+      minimum: 0
+    GenuineVolume:
+      description: The USDC volume of the genuine payments in base units.
+      allOf: [{$ref: '#/components/schemas/Amount'}]
+    LeaderboardItem:
+      description: One entity on a leaderboard, summed over the window.
+      type: object
+      additionalProperties: false
+      required: [id, tier, raw_payments, raw_volume, genuine_payments, genuine_volume, active_days, first_day, last_day]
+      properties:
+        id:
+          type: string
+          description: The entity. A registry id, a lowercase relayer address or `unknown` on the facilitator board, a lowercase address on the seller and payer boards.
+          examples: [monad-foundation]
+        name:
+          description: The registry name of the facilitator. Null for tier B. Only the facilitator board has this key.
+          type: [string, "null"]
+        tier: {type: string, enum: [A, B]}
+        raw_payments: {$ref: '#/components/schemas/RawPayments'}
+        raw_volume: {$ref: '#/components/schemas/RawVolume'}
+        genuine_payments: {$ref: '#/components/schemas/GenuinePayments'}
+        genuine_volume: {$ref: '#/components/schemas/GenuineVolume'}
+        gas_cost:
+          description: The gas the facilitator spent in the window, in wei, as a decimal string. Only the facilitator board has this key.
+          allOf: [{$ref: '#/components/schemas/Amount'}]
+        active_days:
+          type: integer
+          description: The number of days in the window with at least one raw payment.
+          minimum: 1
+        first_day:
+          description: The first day in the window with a raw payment.
+          allOf: [{$ref: '#/components/schemas/Day'}]
+        last_day:
+          description: The last day in the window with a raw payment.
+          allOf: [{$ref: '#/components/schemas/Day'}]
+    Leaderboard:
+      description: A ranking of one kind of entity over a window.
+      type: object
+      additionalProperties: false
+      required: [kind, chain, board, from, to, tier, order, items]
+      properties:
+        kind: {type: string, enum: [x402_leaderboard]}
+        chain: {type: string, enum: [eip155:143, eip155:8453]}
+        board: {type: string, enum: [facilitators, sellers, payers]}
+        from:
+          description: The first day of the window, as resolved by the service.
+          allOf: [{$ref: '#/components/schemas/Day'}]
+        to:
+          description: The last day of the window, as resolved by the service.
+          allOf: [{$ref: '#/components/schemas/Day'}]
+        tier: {type: string, enum: [A, AB]}
+        order: {type: string, enum: [genuine_volume, raw_volume, genuine_payments, raw_payments]}
+        items:
+          type: array
+          description: The ranked entities, best first, at most `limit`. Empty when the window holds no payment.
+          items: {$ref: '#/components/schemas/LeaderboardItem'}
+    Window:
+      description: The window as resolved by the service.
+      type: object
+      additionalProperties: false
+      required: [from, to]
+      properties:
+        from: {$ref: '#/components/schemas/Day'}
+        to: {$ref: '#/components/schemas/Day'}
+    FlowAmount:
+      type: object
+      additionalProperties: false
+      required: [raw, decimals, value]
+      properties:
+        raw: {$ref: '#/components/schemas/Amount'}
+        decimals: {type: integer, enum: [6]}
+        value:
+          type: string
+          description: The USDC volume as a decimal number with the point placed and the trailing zeros removed.
+          examples: ["41.0862"]
+    FlowItem:
+      description: One facilitator and payee pair in one tier, summed over the window.
+      type: object
+      additionalProperties: false
+      required: [facilitator, name, payee, tier, raw_payments, raw_volume, genuine_payments, genuine_volume]
+      properties:
+        facilitator:
+          type: string
+          description: A registry id, or the lowercase relayer address of an unlisted relayer.
+        name:
+          description: The registry name of a listed facilitator, null otherwise.
+          type: [string, "null"]
+        payee: {$ref: '#/components/schemas/Address'}
+        tier: {type: string, enum: [A, B]}
+        raw_payments: {$ref: '#/components/schemas/RawPayments'}
+        raw_volume: {$ref: '#/components/schemas/FlowAmount'}
+        genuine_payments: {$ref: '#/components/schemas/GenuinePayments'}
+        genuine_volume: {$ref: '#/components/schemas/FlowAmount'}
+    Flows:
+      description: The facilitator to payee flows of a window, best first.
+      type: object
+      additionalProperties: false
+      required: [kind, window, items]
+      properties:
+        kind: {type: string, enum: [x402_flows]}
+        window: {$ref: '#/components/schemas/Window'}
+        items:
+          type: array
+          description: The flows, at most `limit`. Empty when the window holds no payment.
+          items: {$ref: '#/components/schemas/FlowItem'}
+    RuleDayItem:
+      description: How many payments one signal fired for on one day.
+      type: object
+      additionalProperties: false
+      required: [day, rule, count, payments]
+      properties:
+        day: {$ref: '#/components/schemas/Day'}
+        rule: {$ref: '#/components/schemas/RuleFired'}
+        count:
+          type: integer
+          minimum: 1
+        payments:
+          type: integer
+          description: How many tier A and B payments were checked on that day.
+          minimum: 1
+    RulesDaily:
+      description: The daily counts of the signals in a window.
+      type: object
+      additionalProperties: false
+      required: [kind, window, items]
+      properties:
+        kind: {type: string, enum: [x402_rules_daily]}
+        window: {$ref: '#/components/schemas/Window'}
+        items:
+          type: array
+          description: One item per day and signal that fired, by day and then by rule.
+          items: {$ref: '#/components/schemas/RuleDayItem'}
+    DayItem:
+      description: One day of one entity. Only the figures that apply to the entity are present.
+      type: object
+      additionalProperties: false
+      required: [day, tier, raw_payments, raw_volume, genuine_payments, genuine_volume]
+      properties:
+        day: {$ref: '#/components/schemas/Day'}
+        tier: {type: string, enum: [A, B]}
+        raw_payments: {$ref: '#/components/schemas/RawPayments'}
+        raw_volume: {$ref: '#/components/schemas/RawVolume'}
+        genuine_payments: {$ref: '#/components/schemas/GenuinePayments'}
+        genuine_volume: {$ref: '#/components/schemas/GenuineVolume'}
+        raw_payers:
+          type: integer
+          description: How many distinct payers paid on this day. On a facilitator day and a seller day, absent on a payer day.
+          minimum: 0
+        raw_sellers:
+          type: integer
+          description: How many distinct sellers were paid on this day. On a facilitator day and a payer day, absent on a seller day.
+          minimum: 0
+        gas_cost:
+          description: The gas spent on this day in wei, as a decimal string. On a facilitator day only.
+          allOf: [{$ref: '#/components/schemas/Amount'}]
+    Daily:
+      description: The days of one entity in a window.
+      type: object
+      additionalProperties: false
+      required: [kind, chain, entity, id, from, to, tier, items]
+      properties:
+        kind: {type: string, enum: [x402_daily]}
+        chain: {type: string, enum: [eip155:143, eip155:8453]}
+        entity: {type: string, enum: [facilitators, sellers, payers]}
+        id:
+          type: string
+          description: The entity, in lowercase when it is an address.
+        from:
+          description: The first day of the window, as resolved by the service.
+          allOf: [{$ref: '#/components/schemas/Day'}]
+        to:
+          description: The last day of the window, as resolved by the service.
+          allOf: [{$ref: '#/components/schemas/Day'}]
+        tier: {type: string, enum: [A, AB]}
+        items:
+          type: array
+          description: The days with at least one payment, ascending, one item per day and tier. Empty when the entity has none in the window.
+          items: {$ref: '#/components/schemas/DayItem'}
+    Status:
+      description: How far the indexer and the engine have got.
+      type: object
+      additionalProperties: false
+      required: [kind, chain, indexer, engine, registry_version, rules_version, rows, coverage]
+      properties:
+        kind: {type: string, enum: [x402_status]}
+        chain: {type: string, enum: [eip155:143, eip155:8453]}
+        indexer:
+          type: object
+          additionalProperties: false
+          required: [initialised, progress_block, source_block, is_ready, progress_age_s]
+          properties:
+            initialised:
+              type: boolean
+              description: Whether the indexer has created its tables. The data routes answer 503 while it is false.
+            progress_block:
+              type: integer
+              description: The newest block the indexer has processed. 0 while the indexer is not initialised.
+            source_block:
+              type: integer
+              description: The newest block the indexer's data source reports. 0 while the indexer is not initialised.
+            is_ready:
+              type: boolean
+              description: Whether the indexer has caught up with its data source.
+            progress_age_s:
+              description: The whole seconds between now and the time of the progress block, at least 0. Null when there is no block time yet.
+              type: [integer, "null"]
+        engine:
+          type: object
+          additionalProperties: false
+          required: [cutoff_block, watermark_block, watermark_time, lag_blocks, refreshed_at, refresh_ms]
+          properties:
+            cutoff_block:
+              type: integer
+              description: The newest block the engine may copy, `progress_block` minus 10. It is -1 before the first refresh.
+            watermark_block:
+              type: integer
+              description: The newest block the engine has copied. No served row is above it. It is -1 before the first copy.
+            watermark_time:
+              description: The time of the indexer's progress block, RFC 3339 in UTC. It is the same instant as `Sona-Block-Time`. Null when there is no block time yet.
+              type: [string, "null"]
+              format: date-time
+            lag_blocks:
+              description: The distance `progress_block` minus `watermark_block`, about 10 when the engine is up to date. Null before the first copy.
+              type: [integer, "null"]
+            refreshed_at:
+              type: string
+              format: date-time
+              description: When the last refresh ended, RFC 3339 in UTC.
+            refresh_ms:
+              type: integer
+              description: How long the last refresh took, in milliseconds.
+              minimum: 0
+        registry_version:
+          type: string
+          description: The version of the registry the tiers were computed with. Empty until the engine has copied its first rows.
+          examples: ["2026-10-12.1"]
+        rules_version:
+          type: string
+          description: The version of the genuine-volume rules and thresholds. Empty until the engine has copied its first rows.
+          examples: ["2026-10-12.1"]
+        rows:
+          type: object
+          additionalProperties: false
+          required: [payments, tier_a, tier_b, tier_x, mints]
+          properties:
+            payments:
+              type: integer
+              description: All payments the engine holds, of every tier.
+              minimum: 0
+            tier_a:
+              type: integer
+              description: Of those, the payments of tier A.
+              minimum: 0
+            tier_b:
+              type: integer
+              description: Of those, the payments of tier B.
+              minimum: 0
+            tier_x:
+              type: integer
+              description: Of those, the payments of tier X.
+              minimum: 0
+            mints:
+              type: integer
+              description: The USDC mints the engine holds for the bridge-funded signal.
+              minimum: 0
+        coverage:
+          type: array
+          description: The five limits of the data, always in the same order.
+          items:
+            type: object
+            additionalProperties: false
+            required: [code, note]
+            properties:
+              code:
+                type: string
+                enum: [batch_channels_not_indexed, tier_b_is_shape_only, volume_usdc_only, reverted_settlements_not_visible, upto_ceiling_not_captured, history_starts, payment_rows_pruned]
+              note:
+                type: string
+                description: The limit in a sentence. The wording may change, so branch on `code`.
+    Registry:
+      description: The active registry of facilitators and relayers.
+      type: object
+      additionalProperties: false
+      required: [kind, chain, version, checksum, facilitators, relayers]
+      properties:
+        kind: {type: string, enum: [x402_registry]}
+        chain: {type: string, enum: [eip155:143, eip155:8453]}
+        version:
+          type: string
+          description: The registry version.
+          examples: ["2026-10-12.1"]
+        checksum:
+          type: string
+          description: The SHA-256 of the canonical content of the registry, in hex.
+          pattern: '^[0-9a-f]{64}$'
+        facilitators:
+          type: array
+          description: The listed facilitators.
+          items:
+            type: object
+            additionalProperties: false
+            required: [id, name, addresses]
+            properties:
+              id:
+                type: string
+                description: The registry id, which is `facilitator` on the payments of tier A.
+                examples: [monad-foundation]
+              name:
+                type: string
+                description: The name to show.
+                examples: [Molandak]
+              url:
+                type: string
+                description: The facilitator's website or endpoint. Absent when the registry holds none.
+              addresses:
+                type: array
+                description: The relayer addresses of this facilitator. For a facilitator with builder codes these are the relayers allowed to carry them.
+                items: {$ref: '#/components/schemas/Address'}
+              builder_codes:
+                type: array
+                description: The ERC-8021 builder codes that name this facilitator in the calldata of its settlements. Absent when it has none. A payment is tier A only when its calldata carries one of them as a whole token and its relayer is one of the listed addresses, because the code alone is unauthenticated.
+                items: {type: string}
+                examples: [[cdp_facil1]]
+        relayers:
+          type: array
+          description: Every relayer address of the registry with its class and block range.
+          items:
+            type: object
+            additionalProperties: false
+            required: [address, class, facilitator_id, from_block, to_block]
+            properties:
+              address: {$ref: '#/components/schemas/Address'}
+              class:
+                type: string
+                description: What the address is. `facilitator` gives tier A, `unlisted` gives tier B and `test` gives tier X.
+                enum: [facilitator, unlisted, test]
+              facilitator_id:
+                description: The registry id, set only for class `facilitator`.
+                type: [string, "null"]
+              from_block:
+                description: The first block the entry applies to, inclusive. Null for no start.
+                type: [integer, "null"]
+              to_block:
+                description: The last block the entry applies to, inclusive. Null for no end.
+                type: [integer, "null"]
