@@ -1,0 +1,73 @@
+version: 2026-10-12.1
+entries:
+  - id: monad-foundation
+    name: Molandak
+    url: https://x402-facilitator.molandak.org
+    class: facilitator
+    addresses:
+      - address: "0x7f6a2850669202519f0fe8aa912451238820db86"
+  - id: openx402
+    name: OpenX402
+    url: https://facilitator.openx402.ai
+    class: facilitator
+    addresses:
+      - address: "0x97316fa4730bc7d3b295234f8e4d04a0a4c093e8"
+  - id: dexter
+    name: Dexter
+    url: https://x402.dexter.cash
+    class: facilitator
+    addresses:
+      - address: "0x402feee072d655b85e08f1751af9ddbcd249521f"
+  - id: pieverse
+    name: Pieverse
+    url: https://facilitator.pieverse.io
+    class: facilitator
+    addresses:
+      - address: "0x12343e649e6b2b2b77649dfab88f103c02f3c78b"
+      - address: "0xfa6b2a1fc2151197ce3242d0ea64327b798dbd4a"
+  - id: unlisted
+    name: Unlisted relayers
+    class: unlisted
+    addresses:
+      - address: "0x74dd46f2e70b964895fe21aa70c60a9b61fbe395"
+      - address: "0x67d185427d896aaf1d8781e094f1bad16f7fa967"
+      - address: "0x210f01cf42b4ade5b5f4fa85f483b8a6c31c6f25"
+      - address: "0x97d38aa5de015245dcca76305b53abe6da25f6a5"
+      - address: "0x0168f80e035ea68b191faf9bfc12778c87d92008"
+  - id: test
+    name: Test relayers
+    class: test
+    addresses:
+      - address: "0x22c4953c882264cab154ea688004e6dead21eeeb"
+      - address: "0xcace789ea79011b164f9e3cc4146de0bd3eb41a8"
+chains:
+  eip155:8453:
+    version: 2026-10-13.2
+    entries:
+      - id: coinbase-cdp
+        name: Coinbase CDP
+        url: https://api.cdp.coinbase.com/platform/v2/x402
+        class: facilitator
+        # the builder code alone is unauthenticated, so it counts only from these pool relayers
+        builder_codes: [cdp_facil1]
+        addresses:
+          - address: "0x14fda13953fc30428938e6bf950d036e77214e52"
+          - address: "0x2a89407a98a0732b7fd578c4e156b7166540eb5a"
+          - address: "0x42dd53906b49c202e8e934b059dc019e04634b00"
+          - address: "0x4c934c63c786157fefd990945b25ea60a0fb0205"
+          - address: "0x59b7ebc67a3d627fabaf06768c818638452ae704"
+          - address: "0x625d8a65134079f8faaac39a7947c73d93c6ac39"
+          - address: "0x64cc42b1ce598e3abcfbb64df4688521ddbf1f0a"
+          - address: "0x67b9ce703d9ce658d7c4ac3c289cea112fe662af"
+          - address: "0x68a96f41ff1e9f2e7b591a931a4ad224e7c07863"
+          - address: "0x68efafe862d89ce66dd3d7b07d5a3747a0871164"
+          - address: "0x772003a2e9c2ccc8af956870a37a66f64f8cec38"
+          - address: "0x8cda367232d78c067116e3260da881d2da8ffa39"
+          - address: "0x8f5cb67b49555e614892b7233cfddebfb746e531"
+          - address: "0x93f6601151ccb08f333ab4b1cccfb1e188c0be44"
+          - address: "0x97acce27d5069544480bde0f04d9f47d7422a016"
+          - address: "0xa32ccda98ba7529705a059bd2d213da8de10d101"
+          - address: "0xb87e1a2cc2b4643f2892768e80e41167f17c5860"
+          - address: "0xca5e87f82b3fa093800e6ad67d621a427d79c70d"
+          - address: "0xe72f0af4cf41356d433723547f1412ca27fbb1b8"
+          - address: "0xe74817f4cdc15844314812b2271276e64e890fae"

@@ -1,0 +1,19 @@
+chains:
+  - id: eip155:143
+    source_schema: envio
+    volume_token: "0x754704bc059f8c67012fed69bc8a327a5aafb603"
+  - id: eip155:8453
+    source_schema: envio_base
+    volume_token: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+    builder_codes: true
+    retention_days: 90
+    history_from: 2026-09-13
+refresh_interval: 30s
+margin_blocks: 10
+ingest_batch_rows: 500000
+rules:
+  version: 2026-10-12.1
+  fixed_amount: {min_rows: 100, share: 0.90}
+  payee_concentration: {min_rows: 100, share: 0.90}
+  no_other_activity: {min_rows: 5}
+  bridge_funded: {min_recipients: 10}
