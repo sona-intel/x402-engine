@@ -1,0 +1,14 @@
+version: "2"
+linters:
+  enable: [bodyclose, noctx, errorlint, perfsprint, modernize, nolintlint]
+  exclusions:
+    presets: [std-error-handling]
+formatters:
+  enable: [gofumpt, goimports]
+  settings:
+    gofumpt:
+      module-path: x402
+    goimports:
+      local-prefixes: [x402]
+issues:
+  uniq-by-line: false
