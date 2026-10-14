@@ -28,6 +28,7 @@ type Config struct {
 	BuilderCodes    bool
 	RetentionDays   int
 	HistoryFrom     string
+	GatewayWallet   string
 }
 
 type Rules struct {
@@ -59,6 +60,7 @@ type chainFile struct {
 	BuilderCodes bool   `yaml:"builder_codes"`
 	Retention    int    `yaml:"retention_days"`
 	HistoryFrom  string `yaml:"history_from"`
+	Gateway      string `yaml:"gateway_wallet"`
 }
 
 type file struct {
@@ -120,6 +122,8 @@ func (f file) configs() ([]Config, error) {
 			return nil, fmt.Errorf("chain %s: source_schema %q is not a lowercase identifier", c.ID, c.SourceSchema)
 		case !tokenAddress.MatchString(c.VolumeToken):
 			return nil, fmt.Errorf("chain %s: volume_token %q is not a 0x address", c.ID, c.VolumeToken)
+		case c.Gateway != "" && !tokenAddress.MatchString(c.Gateway):
+			return nil, fmt.Errorf("chain %s: gateway_wallet %q is not a 0x address", c.ID, c.Gateway)
 		case c.Retention < 0:
 			return nil, fmt.Errorf("chain %s: retention_days must not be negative, got %d", c.ID, c.Retention)
 		case schemas[c.SourceSchema]:
@@ -142,6 +146,7 @@ func (f file) configs() ([]Config, error) {
 		out[i] = Config{
 			Chain: c.ID, ChainID: id, RefreshInterval: f.RefreshInterval, MarginBlocks: f.MarginBlocks, SourceSchema: c.SourceSchema,
 			IngestBatchRows: f.IngestBatchRows, Rules: rules, BuilderCodes: c.BuilderCodes, RetentionDays: c.Retention, HistoryFrom: c.HistoryFrom,
+			GatewayWallet: strings.ToLower(c.Gateway),
 		}
 	}
 	return out, nil

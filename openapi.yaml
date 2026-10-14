@@ -80,6 +80,7 @@ info:
     - `reverted_settlements_not_visible`: a reverted settlement leaves no log, so failed attempts and failure rates cannot be seen.
     - `upto_ceiling_not_captured`: the Upto scheme stores the amount that was settled. The ceiling the payer signed is not captured.
     - `history_starts`: only on a chain that is indexed from a given day, which is Base (2026-09-13). Earlier payments are not counted.
+    - `gateway_batches_not_counted`: only on a chain with a Circle Gateway wallet, which is Arc. Gateway nets its x402 payments off-chain and settles them in batches that show only net balance changes, so those payments are not counted. Circle's per-payment facilitator settles through USDC itself and is counted.
     - `payment_rows_pruned`: only on a chain that keeps payment rows for a limited time, which is Base (90 days). Older payments are gone from `/payments`, their daily totals and the rankings stay, computed under the rules in force at the time. A payer's history for the rules reaches back only 90 days, so a payer whose older payments were pruned can be judged on its recent ones alone.
 
     Genuine is a heuristic. Both volume rules can fire for one real, busy seller with a single price and a single facilitator in a day, and small scripted traffic below 100 payments a day passes as genuine. That is why every verdict comes with its `rules_fired`.
@@ -128,7 +129,7 @@ paths:
         - `registry_version` and `rules_version`: the versions the tiers and the genuine rules were computed with. Both are empty until the engine has copied its first rows.
         - `rows`: how many payments the engine holds, in total and per tier, and how many USDC mints. The mints feed the `bridge_funded` signal.
 
-        `coverage` lists the limits of the data, each with a stable code and a sentence. Monad has five, always in this order: `batch_channels_not_indexed`, `tier_b_is_shape_only`, `volume_usdc_only`, `reverted_settlements_not_visible` and `upto_ceiling_not_captured`. Base has the same five and then `history_starts` and `payment_rows_pruned`.
+        `coverage` lists the limits of the data, each with a stable code and a sentence. Monad has five, always in this order: `batch_channels_not_indexed`, `tier_b_is_shape_only`, `volume_usdc_only`, `reverted_settlements_not_visible` and `upto_ceiling_not_captured`. Base has the same five and then `history_starts` and `payment_rows_pruned`. Arc has the same five and then `gateway_batches_not_counted`.
 
         The route answers 200 whenever the database answers, also while the indexer does not exist yet. It reads only the progress record, so it is quick, and it sends no `Sona-*` header, only `X-Request-Id`.
 
@@ -1238,7 +1239,7 @@ components:
               minimum: 0
         coverage:
           type: array
-          description: The five limits of the data, always in the same order.
+          description: The limits of the data, always in the same order.
           items:
             type: object
             additionalProperties: false
@@ -1246,7 +1247,7 @@ components:
             properties:
               code:
                 type: string
-                enum: [batch_channels_not_indexed, tier_b_is_shape_only, volume_usdc_only, reverted_settlements_not_visible, upto_ceiling_not_captured, history_starts, payment_rows_pruned]
+                enum: [batch_channels_not_indexed, tier_b_is_shape_only, volume_usdc_only, reverted_settlements_not_visible, upto_ceiling_not_captured, history_starts, gateway_batches_not_counted, payment_rows_pruned]
               note:
                 type: string
                 description: The limit in a sentence. The wording may change, so branch on `code`.

@@ -338,6 +338,9 @@ func coverageFor(cfg config.Config) []coverage {
 	if cfg.HistoryFrom != "" {
 		out = append(out, coverage{"history_starts", "The indexer covers this chain from " + cfg.HistoryFrom + ", earlier payments are not counted."})
 	}
+	if cfg.GatewayWallet != "" {
+		out = append(out, coverage{"gateway_batches_not_counted", "Circle Gateway nets its x402 payments off-chain and settles them in batches through " + cfg.GatewayWallet + ", which show only net balance changes, so they are not counted."})
+	}
 	if cfg.RetentionDays > 0 {
 		out = append(out, coverage{"payment_rows_pruned", "Payment rows are kept for the last " + strconv.Itoa(cfg.RetentionDays) + " days, daily totals and rankings are kept without limit. Days older than that keep the totals computed under the rules in force at the time, and a payer's history for the rules reaches back only that far."})
 	}

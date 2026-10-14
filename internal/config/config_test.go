@@ -71,6 +71,7 @@ func TestSeedConfigArc(t *testing.T) {
 	check(t, "BuilderCodes", a.BuilderCodes, false)
 	check(t, "RetentionDays", a.RetentionDays, 0)
 	check(t, "HistoryFrom", a.HistoryFrom, "")
+	check(t, "GatewayWallet", a.GatewayWallet, "0x77777777dcc4d5a8b6e418fd04d8997ef11000ee")
 	check(t, "Rules.Version", a.Rules.Version, cs[0].Rules.Version)
 }
 
@@ -172,6 +173,7 @@ func TestLoadRejects(t *testing.T) {
 		"schema is not a name":      strings.Replace(head, "envio", `"envio; drop"`, 1) + rulesPlain,
 		"negative retention":        chain("retention_days: -1") + rulesPlain,
 		"history day is not a day":  chain("history_from: 2026-13-45") + rulesPlain,
+		"gateway is not an address": chain("gateway_wallet: 0x7777") + rulesPlain,
 		"not yaml":                  "chains: [",
 		"no rules block":            head,
 		"empty rules block":         head + "rules: {}\n",

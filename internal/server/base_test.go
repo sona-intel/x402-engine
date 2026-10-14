@@ -161,3 +161,15 @@ func TestNewRefusesAChainTheRegistryLacks(t *testing.T) {
 		t.Fatal("a chain without a registry was accepted")
 	}
 }
+
+func TestOnlyAGatewayChainNamesGatewayBatches(t *testing.T) {
+	arc := coverageFor(config.Config{GatewayWallet: "0x77777777dcc4d5a8b6e418fd04d8997ef11000ee"})
+	if last := arc[len(arc)-1]; last.Code != "gateway_batches_not_counted" || !strings.Contains(last.Note, "0x77777777dcc4d5a8b6e418fd04d8997ef11000ee") {
+		t.Fatalf("Arc coverage %v", arc)
+	}
+	for _, c := range coverageFor(config.Config{}) {
+		if c.Code == "gateway_batches_not_counted" {
+			t.Fatalf("Monad coverage names Gateway batches")
+		}
+	}
+}
