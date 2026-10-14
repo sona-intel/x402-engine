@@ -2,9 +2,9 @@ openapi: 3.1.2
 info:
   title: Sona x402 engine
   version: 1.0.0
-  summary: Internal reads of x402 payments on Monad and Base, called only by sona-api.
+  summary: Internal reads of x402 payments on Monad, Arc and Base, called only by sona-api.
   description: |
-    This service answers questions about x402 payments on Monad and Base: which payments were made, which facilitator settled each one, how much of the volume is genuine, and who the top facilitators, sellers and payers are. An x402 payment is a signed stablecoin transfer that a facilitator submits to the chain for the payer. The service reads a database that the x402 indexers fill (Monad from its whole history, Base from 2026-09-13), classifies every payment by published rules and returns the result as clean JSON. Nothing here signs, pays, relays or settles a payment: it only reads payments that others made. Only the public `sona-api` will call this service, and it will put these bodies inside its public answers. You call it directly to debug, or to see exactly what the public API will get.
+    This service answers questions about x402 payments on Monad, Arc and Base: which payments were made, which facilitator settled each one, how much of the volume is genuine, and who the top facilitators, sellers and payers are. An x402 payment is a signed stablecoin transfer that a facilitator submits to the chain for the payer. The service reads a database that the x402 indexers fill (Monad from its whole history, Base from 2026-09-13), classifies every payment by published rules and returns the result as clean JSON. Nothing here signs, pays, relays or settles a payment: it only reads payments that others made. Only the public `sona-api` will call this service, and it will put these bodies inside its public answers. You call it directly to debug, or to see exactly what the public API will get.
 
     ## Pick a chain
 
@@ -860,7 +860,7 @@ components:
         id:
           type: string
           description: The payment id, `<chain number>_<block>_<log_index>`, such as `143_52996376_25` on Monad and `8453_51234200_3` on Base. The log index counts logs in the whole block.
-          pattern: '^(143|8453)_[0-9]+_[0-9]+$'
+          pattern: '^(143|8453|5042)_[0-9]+_[0-9]+$'
           examples: ["143_52996376_25"]
         chain:
           type: string

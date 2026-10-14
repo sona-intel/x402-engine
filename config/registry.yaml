@@ -71,3 +71,7 @@ chains:
           - address: "0xca5e87f82b3fa093800e6ad67d621a427d79c70d"
           - address: "0xe72f0af4cf41356d433723547f1412ca27fbb1b8"
           - address: "0xe74817f4cdc15844314812b2271276e64e890fae"
+  # Circle's relayers are not known yet, so Arc payments stay unlisted until they are learned from the chain
+  eip155:5042:
+    version: 2026-10-14.1
+    entries: []

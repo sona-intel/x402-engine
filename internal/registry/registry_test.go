@@ -179,6 +179,23 @@ func TestSeedRegistryBase(t *testing.T) {
 	}
 }
 
+func TestSeedRegistryArc(t *testing.T) {
+	root, err := Load("../../config/registry.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, ok := root.For("eip155:5042")
+	if !ok {
+		t.Fatal("no Arc registry")
+	}
+	if r.Version != "2026-10-14.1" || len(r.Checksum) != 64 || r.Checksum == root.Checksum {
+		t.Fatal(r.Version, r.Checksum)
+	}
+	if len(r.Entries) != 0 {
+		t.Fatalf("%d Arc entries, want none until the relayers are known", len(r.Entries))
+	}
+}
+
 func TestForReturnsTheRootForMonadAndNothingForAnUnknownChain(t *testing.T) {
 	root, err := Load(write(t, base))
 	if err != nil {

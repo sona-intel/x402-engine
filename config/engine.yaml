@@ -8,6 +8,9 @@ chains:
     builder_codes: true
     retention_days: 90
     history_from: 2026-09-13
+  - id: eip155:5042
+    source_schema: envio_arc
+    volume_token: "0x3600000000000000000000000000000000000000"
 refresh_interval: 30s
 margin_blocks: 10
 ingest_batch_rows: 500000

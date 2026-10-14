@@ -1,6 +1,6 @@
 # Sona Intel — x402 engine
 
-How Sona analyses x402 payments. It reads the settlements collected by the `indexer` repository, for Monad (`eip155:143`) and Base (`eip155:8453`), and works out:
+How Sona analyses x402 payments. It reads the settlements collected by the `indexer` repository, for Monad (`eip155:143`), Base (`eip155:8453`) and Arc (`eip155:5042`), and works out:
 
 - which facilitator or relayer settled each payment;
 - genuine versus raw volume, with the rules published so anyone can check them;

@@ -20,7 +20,7 @@ func TestSeedConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	check(t, "chains", len(cs), 2)
+	check(t, "chains", len(cs), 3)
 	c := cs[0]
 	check(t, "Chain", c.Chain, "eip155:143")
 	check(t, "ChainID", c.ChainID, 143)
@@ -56,6 +56,22 @@ func TestSeedConfigBase(t *testing.T) {
 	if b.Rules.Version != cs[0].Rules.Version || b.Rules.FixedAmount != cs[0].Rules.FixedAmount {
 		t.Errorf("Base rules %+v differ from Monad rules %+v", b.Rules, cs[0].Rules)
 	}
+}
+
+func TestSeedConfigArc(t *testing.T) {
+	cs, err := Load("../../config")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := cs[2]
+	check(t, "Chain", a.Chain, "eip155:5042")
+	check(t, "ChainID", a.ChainID, 5042)
+	check(t, "SourceSchema", a.SourceSchema, "envio_arc")
+	check(t, "Rules.VolumeToken", a.Rules.VolumeToken, "0x3600000000000000000000000000000000000000")
+	check(t, "BuilderCodes", a.BuilderCodes, false)
+	check(t, "RetentionDays", a.RetentionDays, 0)
+	check(t, "HistoryFrom", a.HistoryFrom, "")
+	check(t, "Rules.Version", a.Rules.Version, cs[0].Rules.Version)
 }
 
 // the Monad rules checksum is stored in the live engine, so a change would rebuild its copy
