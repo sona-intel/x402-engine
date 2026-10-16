@@ -163,15 +163,25 @@ func TestSeedRegistryBase(t *testing.T) {
 	if !ok {
 		t.Fatal("no Base registry")
 	}
-	if r.Version != "2026-10-13.2" || len(r.Checksum) != 64 || r.Checksum == root.Checksum {
+	if r.Version != "2026-10-16.1" || len(r.Checksum) != 64 || r.Checksum == root.Checksum {
 		t.Fatal(r.Version, r.Checksum)
 	}
-	if len(r.Entries) != 1 {
-		t.Fatalf("%d Base entries, want 1", len(r.Entries))
+	if len(r.Entries) != 2 {
+		t.Fatalf("%d Base entries, want 2", len(r.Entries))
 	}
 	e := r.Entries[0]
 	if e.ID != "coinbase-cdp" || e.Class != "facilitator" || len(e.Addresses) != 20 || len(e.Codes) != 1 || e.Codes[0] != "cdp_facil1" {
 		t.Fatalf("Base entry %+v", e)
+	}
+	p := r.Entries[1]
+	if p.ID != "payai" || p.Class != "facilitator" || len(p.Addresses) != 4 || len(p.Codes) != 0 {
+		t.Fatalf("PayAI entry %+v", p)
+	}
+	// each signer counts from its first payment that Sona holds, so no range reaches back before the evidence
+	for _, a := range p.Addresses {
+		if a.FromBlock == nil || *a.FromBlock < 51234126 || a.ToBlock != nil {
+			t.Errorf("PayAI address %s from %v to %v", a.Hex, a.FromBlock, a.ToBlock)
+		}
 	}
 	codes, ids := r.Codes()
 	if len(codes) != 1 || codes[0] != "cdp_facil1" || ids[0] != "coinbase-cdp" {

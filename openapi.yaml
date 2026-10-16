@@ -22,9 +22,9 @@ info:
 
     Every payment gets one of three tiers. The tier decides where the payment shows up.
 
-    - `A`: the relayer, which is the address that sent the settling transaction, is a facilitator in the registry (read it at `/registry`) and the payment lies inside the block range of that address. `facilitator` is the registry id, such as `monad-foundation`.
-    - `B`: the payment has the x402 shape but its relayer is no listed facilitator, or it has no relayer. `facilitator` is the lowercase relayer address, or `unknown`. Tier B is a shape test only, so it also holds ordinary gasless transfers.
-    - `X`: not an x402 payment. Either the method is `batch_deposit`, `other` (a call routed through another contract) or `eip3009_receive`, with reason `not_x402`, or the relayer is a registered test relayer, with reason `test_relayer`. A tier X row has `facilitator` and `genuine` null. It is served by the payment routes with `tier=all` and by the transaction route, and it is left out of every leaderboard and daily total.
+    - `A`: the relayer, which is the address that sent the settling transaction, is a facilitator in the registry (read it at `/registry`) and the payment lies inside the block range of that address. `facilitator` is the registry id, such as `monad-foundation`. A call routed through another contract (`eip3009_routed`) is tier A on the same terms.
+    - `B`: the payment has the x402 shape but its relayer is no listed facilitator, or it has no relayer, and it is a direct call or a Permit2 settlement. `facilitator` is the lowercase relayer address, or `unknown`. Tier B is a shape test only, so it also holds ordinary gasless transfers.
+    - `X`: not counted, and `reason` says why. `not_x402`: the method is `batch_deposit`, `other` (a call through another contract whose input holds no `transferWithAuthorization` of the payer) or `eip3009_receive`. `routed_unlisted`: the method is `eip3009_routed` and the relayer is no listed facilitator, so the call can as well be a smart-wallet transfer or a bridge. `test_relayer`: the relayer is a registered test relayer. A tier X row has `facilitator` and `genuine` null. It is served by the payment routes with `tier=all` and by the transaction route, and it is left out of every leaderboard and daily total.
 
     Raw numbers count every tier A and B payment. Genuine numbers leave out the payments that look like generated traffic. A payment is **genuine** unless `self_payment` fires, or at least 2 of the other four signals fire. One signal alone is not enough, because it also fits a real, busy seller. The service lists the signals that fired for a payment in `rules_fired`, in this order:
 
@@ -175,7 +175,7 @@ paths:
         Call this to see which relayer addresses count as which facilitator, because that registry decides tier A. The body has the `version` and the `checksum` of the registry, the `facilitators` (id, name, website and addresses) and the `relayers`, which is one entry per address with its `class`:
 
         - `facilitator`: a listed facilitator. Its payments are tier A, and `facilitator_id` is its registry id.
-        - `unlisted`: a relayer that was seen settling payments and is no facilitator. Its payments are tier B.
+        - `unlisted`: a relayer that was seen settling payments and is no facilitator. Its payments are tier B, and its routed calls (`eip3009_routed`) tier X with reason `routed_unlisted`.
         - `test`: a relayer that only settles tests. Its payments are tier X with reason `test_relayer`.
 
         An address applies only to payments from `from_block` to `to_block`, both inclusive, and an end that is null is open. The checksum is the SHA-256 of the canonical content, so comments and key order in the source file do not change it. When the registry changes it gets a new version and the service classifies every payment again.
@@ -450,7 +450,7 @@ paths:
                   summary: A payment of a burst, 100 units to a single payee, and a next page
                   value: {"kind": "x402_payments", "chain": "eip155:143", "items": [{"id": "143_101000000_35", "chain": "eip155:143", "block": 101000000, "block_time": "2026-09-01T08:56:14Z", "tx": "0x89f2eb1aebd2bff647aebf05eecef078021432b6fcf956b33ad45f47bdd8b25c", "log_index": 35, "method": "eip3009_transfer", "token": "0x754704bc059f8c67012fed69bc8a327a5aafb603", "payer": "0x648b2d6487e86bab067eb3ecdde5ff00a13a671f", "payee": "0x1995159c8d4df2268a17c0169a80f0e7d11a7424", "amount": "100", "nonce": "0x49ea92279f18c031cfe673a3a11f5234edb7d7d287c4b5293190107f7e586e05", "valid_after": "0", "valid_before": "1788253273", "relayer": "0x7f6a2850669202519f0fe8aa912451238820db86", "tx_to": "0x754704bc059f8c67012fed69bc8a327a5aafb603", "selector": "0xe3ee160e", "gas_cost": "15856410000155455", "tier": "A", "facilitator": "monad-foundation", "reason": null, "genuine": false, "rules_fired": ["fixed_amount", "payee_concentration", "no_other_activity"]}], "next_cursor": "101000000.35"}
                 routed_call:
-                  summary: A call routed through another contract, which is tier X and has no decoded payee or amount
+                  summary: A call through another contract whose input holds no token call of the payer, which is tier X and has no decoded payee or amount
                   value: {"kind": "x402_payments", "chain": "eip155:143", "items": [{"id": "143_76900022_14", "chain": "eip155:143", "block": 76900022, "block_time": "2026-05-25T11:22:29Z", "tx": "0x4443a79d069bbb50bbf2118321a344ac00d8416d4dfce63cc177a20ca44aee5a", "log_index": 14, "method": "other", "token": "0x754704bc059f8c67012fed69bc8a327a5aafb603", "payer": "0x76c7294829457c93cd3757719359f3c832143bc8", "payee": null, "amount": null, "nonce": "0xc86ada23d13d787549ef55ad74283931e0e913e2316451d9635d15a3f88b1a3f", "valid_after": null, "valid_before": null, "relayer": "0xec917b93a20ddc3017b01494802699d1596571ba", "tx_to": "0xce71bb7db465378db1271c97eaa518ca37e4a85b", "selector": "0xbc28300c", "gas_cost": "34763334000340817", "tier": "X", "facilitator": null, "reason": "not_x402", "genuine": null, "rules_fired": []}]}
         "400":
           $ref: '#/components/responses/InvalidQuery'
@@ -600,7 +600,7 @@ components:
       in: query
       required: false
       description: |
-        Which tiers to list. `A` (the default) is the listed facilitators, `AB` adds the unlisted relayers of tier B, and `all` adds tier X, the rows that are not x402 payments.
+        Which tiers to list. `A` (the default) is the listed facilitators, `AB` adds the unlisted relayers of tier B, and `all` adds tier X, the rows that are not counted.
       schema: {type: string, enum: [A, AB, all], default: A}
     Order:
       name: order
@@ -665,7 +665,7 @@ components:
       in: query
       required: false
       description: |
-        Only payments of this method. A direct EIP-3009 call is `eip3009_transfer` or `eip3009_receive`, a Permit2 proxy settlement is `permit2_exact` or `permit2_upto`, a deposit of the batch scheme is `batch_deposit`, and `other` is every call that was routed through another contract.
+        Only payments of this method. A direct EIP-3009 call is `eip3009_transfer` or `eip3009_receive`, a Permit2 proxy settlement is `permit2_exact` or `permit2_upto`, a deposit of the batch scheme is `batch_deposit`, `eip3009_routed` is a `transferWithAuthorization` found inside the input of another contract, such as Multicall3, and `other` is every other call through another contract.
       schema: {$ref: '#/components/schemas/Method'}
     DeadlineMs:
       name: Sona-Deadline-Ms
@@ -846,8 +846,8 @@ components:
       examples: ["101000000.35"]
     Method:
       type: string
-      description: How the payment reached the chain. `eip3009_transfer` and `eip3009_receive` are direct calls of a token's `transferWithAuthorization` and `receiveWithAuthorization`. `permit2_exact` and `permit2_upto` are settlements through the Permit2 proxies of the Exact and Upto schemes. `batch_deposit` is a deposit of the batch scheme. `other` is a call that was routed through another contract, so its payee and amount are not decoded.
-      enum: [eip3009_transfer, eip3009_receive, permit2_exact, permit2_upto, batch_deposit, other]
+      description: How the payment reached the chain. `eip3009_transfer` and `eip3009_receive` are direct calls of a token's `transferWithAuthorization` and `receiveWithAuthorization`. `permit2_exact` and `permit2_upto` are settlements through the Permit2 proxies of the Exact and Upto schemes. `batch_deposit` is a deposit of the batch scheme. `eip3009_routed` is a token's `transferWithAuthorization` made through another contract, such as Multicall3 or a facilitator's router, and found in the transaction input by the payer and the nonce of the event. Its payee is the `to` of that call, which for some routers is an intermediate address and not the seller. `other` is a call through another contract whose input holds no such call, so its payee and amount are not decoded.
+      enum: [eip3009_transfer, eip3009_receive, permit2_exact, permit2_upto, batch_deposit, other, eip3009_routed]
     RuleFired:
       type: string
       description: A genuine-volume signal. The table in the description of this document says when each one fires.
@@ -922,8 +922,8 @@ components:
           description: The registry id for tier A, the lowercase relayer address or `unknown` for tier B, and null for tier X.
           type: [string, "null"]
         reason:
-          description: Why a payment is tier X. `not_x402` is a method that is no x402 payment, and `test_relayer` is a payment of a registered test relayer. Null for tier A and B.
-          anyOf: [{type: string, enum: [not_x402, test_relayer]}, {type: "null"}]
+          description: Why a payment is tier X. `not_x402` is a batch deposit, a receive call or a call through another contract whose payee is not decoded (`other`), `routed_unlisted` is a routed call (`eip3009_routed`) of a relayer that is no listed facilitator, and `test_relayer` is a payment of a registered test relayer. Null for tier A and B.
+          anyOf: [{type: string, enum: [not_x402, routed_unlisted, test_relayer]}, {type: "null"}]
         genuine:
           description: The verdict of the genuine-volume rules. Null for tier X.
           type: [boolean, "null"]
@@ -1306,7 +1306,7 @@ components:
               address: {$ref: '#/components/schemas/Address'}
               class:
                 type: string
-                description: What the address is. `facilitator` gives tier A, `unlisted` gives tier B and `test` gives tier X.
+                description: What the address is. `facilitator` gives tier A, `unlisted` gives tier B (tier X for its routed calls) and `test` gives tier X.
                 enum: [facilitator, unlisted, test]
               facilitator_id:
                 description: The registry id, set only for class `facilitator`.

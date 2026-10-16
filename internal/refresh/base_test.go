@@ -12,12 +12,13 @@ import (
 )
 
 const (
-	baseUSDC   = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
-	cdpSigner  = "0x14fda13953fc30428938e6bf950d036e77214e52"
-	cdpCodes   = "w=cdp_facil1"
-	baseChain  = "eip155:8453"
-	retention  = 90
-	secondsDay = 86400
+	baseUSDC    = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+	cdpSigner   = "0x14fda13953fc30428938e6bf950d036e77214e52"
+	payaiSigner = "0xc6699d2aada6c36dfea5c248dd70f9cb0235cb63"
+	cdpCodes    = "w=cdp_facil1"
+	baseChain   = "eip155:8453"
+	retention   = 90
+	secondsDay  = 86400
 )
 
 type both struct {
@@ -135,6 +136,44 @@ func TestBuilderCodeMakesTheCDPFacilitator(t *testing.T) {
 	}
 }
 
+func TestRoutedRowsCountOnlyForAListedFacilitator(t *testing.T) {
+	const payaiFrom = 51234281
+	w := setupBoth(t, payaiFrom+1000)
+	routed := func(block int64, relayer, codes string) testkit.Row {
+		r := basePay(block, relayer, codes)
+		r.Method, r.TxTo, r.Selector = "eip3009_routed", "0xca11bde05977b3631167028862be2a173976ca11", "0x82ad56cb"
+		return r
+	}
+	w.base.Insert(t,
+		routed(payaiFrom-1, payaiSigner, ""),
+		routed(payaiFrom, payaiSigner, ""),
+		basePay(payaiFrom+1, payaiSigner, ""),
+		routed(payaiFrom+2, cdpSigner, cdpCodes),
+		routed(payaiFrom+3, cdpSigner, ""),
+		routed(payaiFrom+4, unlisted, ""),
+	)
+	w.onceBase(t)
+	type got struct{ tier, facilitator, reason string }
+	want := map[int64]got{
+		payaiFrom - 1: {"X", "", "routed_unlisted"}, payaiFrom: {"A", "payai", ""}, payaiFrom + 1: {"A", "payai", ""},
+		payaiFrom + 2: {"A", "coinbase-cdp", ""}, payaiFrom + 3: {"X", "", "routed_unlisted"}, payaiFrom + 4: {"X", "", "routed_unlisted"},
+	}
+	for block, g := range want {
+		var tier, facilitator, reason string
+		err := w.monad.Store.Pool.QueryRow(t.Context(), `select tier, coalesce(facilitator_id, ''), coalesce(reason, '') from payment where chain_id = 8453 and block = $1`, block).
+			Scan(&tier, &facilitator, &reason)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if (got{tier, facilitator, reason}) != g {
+			t.Errorf("block %d got %s %q %q, want %+v", block, tier, facilitator, reason, g)
+		}
+	}
+	if n := scalar[int](t, w.monad, `select coalesce(sum(raw_payments), 0)::int from daily_facilitator where chain_id = 8453 and facilitator_id = 'payai'`); n != 2 {
+		t.Fatalf("PayAI daily rows count %d payments, want 2", n)
+	}
+}
+
 func TestBuilderCodeIsIgnoredWhereTheSourceHasNone(t *testing.T) {
 	d, cfg, reg := setup(t, 1000)
 	r := pay(10)
@@ -154,7 +193,7 @@ func TestChangingTheBaseRegistryRebuildsOnlyBase(t *testing.T) {
 	w.onceBase(t)
 	mbefore := meta(t, w.monad)
 
-	edited := registryFrom(t, "builder_codes: [cdp_facil1]", "builder_codes: [cdp_facil2]", "version: 2026-10-13.2", "version: 2026-10-13.3")
+	edited := registryFrom(t, "builder_codes: [cdp_facil1]", "builder_codes: [cdp_facil2]", "version: 2026-10-16.1", "version: 2026-10-16.2")
 	r, _ := edited.For(baseChain)
 	res, err := Once(t.Context(), w.monad.Store, w.bcfg, r)
 	if err != nil || res.Reset || res.Ingested != 2 {
@@ -178,7 +217,7 @@ func TestAuditKeepsOneRowPerChainAndVersion(t *testing.T) {
 	w := setupBoth(t, 1000)
 	once(t, w.monad, w.mcfg, w.reg)
 	w.onceBase(t)
-	bump := registryFrom(t, "version: 2026-10-13.2", "version: 2026-10-12.1")
+	bump := registryFrom(t, "version: 2026-10-16.1", "version: 2026-10-12.1")
 	r, _ := bump.For(baseChain)
 	if _, err := Once(t.Context(), w.monad.Store, w.bcfg, r); err != nil {
 		t.Fatal(err)
@@ -256,7 +295,7 @@ func TestAWipeKeepsTheDailyRowsOfPrunedDays(t *testing.T) {
 	if _, err := Prune(t.Context(), w.monad.Store, w.bcfg, pruneAt(today)); err != nil {
 		t.Fatal(err)
 	}
-	edited := registryFrom(t, "version: 2026-10-13.2", "version: 2026-10-13.3")
+	edited := registryFrom(t, "version: 2026-10-16.1", "version: 2026-10-16.2")
 	r, _ := edited.For(baseChain)
 	if _, err := Once(t.Context(), w.monad.Store, w.bcfg, r); err != nil {
 		t.Fatal(err)

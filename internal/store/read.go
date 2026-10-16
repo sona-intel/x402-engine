@@ -15,11 +15,15 @@ const (
 	KindPayers       = "payers"
 )
 
-var methods = [...]string{1: "eip3009_transfer", 2: "eip3009_receive", 3: "permit2_exact", 4: "permit2_upto", 5: "batch_deposit", 6: "other"}
+var methods = [...]string{
+	1: "eip3009_transfer", 2: "eip3009_receive", 3: "permit2_exact", 4: "permit2_upto", 5: "batch_deposit", methodOther: "other", 7: "eip3009_routed",
+}
+
+const methodOther = 6
 
 func MethodName(ordinal int16) string {
 	if ordinal < 1 || int(ordinal) >= len(methods) {
-		return methods[len(methods)-1]
+		return methods[methodOther]
 	}
 	return methods[ordinal]
 }

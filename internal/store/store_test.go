@@ -19,6 +19,17 @@ func TestSQLQuotesTheSourceSchema(t *testing.T) {
 	}
 }
 
+func TestMethodNamesRoundTripAndUnknownOrdinalsAreOther(t *testing.T) {
+	for ordinal, name := range map[int16]string{1: "eip3009_transfer", 6: "other", 7: "eip3009_routed", 0: "other", 8: "other", -1: "other"} {
+		if got := store.MethodName(ordinal); got != name {
+			t.Errorf("MethodName(%d) = %q, want %q", ordinal, got, name)
+		}
+	}
+	if o, ok := store.MethodOrdinal("eip3009_routed"); !ok || o != 7 {
+		t.Fatalf("MethodOrdinal(eip3009_routed) = %d %v", o, ok)
+	}
+}
+
 func TestMetaOfAnEmptyEngineIsTheStartingState(t *testing.T) {
 	d := testkit.New(t)
 	d.Migrate(t)

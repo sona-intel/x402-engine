@@ -216,6 +216,11 @@ func TestTiers(t *testing.T) {
 		{"other method", molandak, "other", "X", "", "not_x402"},
 		{"test relayer", testRelayer, "permit2_exact", "X", "", "test_relayer"},
 		{"test relayer with batch deposit", testRelayer, "batch_deposit", "X", "", "not_x402"},
+		{"routed by a known facilitator", molandak, "eip3009_routed", "A", "monad-foundation", ""},
+		{"routed by an unlisted relayer", unlisted, "eip3009_routed", "X", "", "routed_unlisted"},
+		{"routed by a relayer in no list", testkit.Addr(9), "eip3009_routed", "X", "", "routed_unlisted"},
+		{"routed with no relayer", "", "eip3009_routed", "X", "", "routed_unlisted"},
+		{"routed by a test relayer", testRelayer, "eip3009_routed", "X", "", "test_relayer"},
 	}
 	rows := make([]testkit.Row, len(cases))
 	for i, c := range cases {
@@ -237,7 +242,7 @@ func TestTiers(t *testing.T) {
 			}
 		})
 	}
-	if m := meta(t, d); m.RowsPayment != 9 || m.RowsTierA != 1 || m.RowsTierB != 3 || m.RowsTierX != 5 {
+	if m := meta(t, d); m.RowsPayment != 14 || m.RowsTierA != 2 || m.RowsTierB != 3 || m.RowsTierX != 9 {
 		t.Fatalf("counts %d = %d A + %d B + %d X", m.RowsPayment, m.RowsTierA, m.RowsTierB, m.RowsTierX)
 	}
 }
@@ -262,7 +267,7 @@ func TestTierHonoursRegistryRanges(t *testing.T) {
 
 func TestMethodOrdinals(t *testing.T) {
 	d, cfg, reg := setup(t, 1000)
-	methods := []string{"eip3009_transfer", "eip3009_receive", "permit2_exact", "permit2_upto", "batch_deposit", "other", "unheard_of"}
+	methods := []string{"eip3009_transfer", "eip3009_receive", "permit2_exact", "permit2_upto", "batch_deposit", "other", "eip3009_routed", "unheard_of"}
 	rows := make([]testkit.Row, len(methods))
 	for i, m := range methods {
 		rows[i] = pay(int64(100 + i))
@@ -270,7 +275,7 @@ func TestMethodOrdinals(t *testing.T) {
 	}
 	d.Insert(t, rows...)
 	once(t, d, cfg, reg)
-	want := []int16{1, 2, 3, 4, 5, 6, 6}
+	want := []int16{1, 2, 3, 4, 5, 6, 7, 6}
 	if got := column[int16](t, d, `select method from payment order by block`); !slices.Equal(got, want) {
 		t.Fatalf("ordinals %v, want %v", got, want)
 	}

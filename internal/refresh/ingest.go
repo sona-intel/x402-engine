@@ -30,7 +30,7 @@ with s as (
 		p.amount, p.nonce, p."validAfter" as valid_after, p."validBefore" as valid_before, p.relayer, p."txTo" as tx_to, p.selector,
 		p."gasCost" as gas_cost, decode(substr(p.relayer, 3), 'hex') as relayer_bytes, {codes} as codes,
 		case p.method when 'eip3009_transfer' then 1 when 'eip3009_receive' then 2 when 'permit2_exact' then 3 when 'permit2_upto' then 4
-			when 'batch_deposit' then 5 else 6 end as method
+			when 'batch_deposit' then 5 when 'eip3009_routed' then 7 else 6 end as method
 	from {src}."X402Payment" p
 	where p."chainId" = $1 and p."blockNumber" > $2 and p."blockNumber" <= $3
 ), ins as (
@@ -61,7 +61,8 @@ with s as (
 		)) then l.facilitator_id end as id
 	) f
 	cross join lateral (
-		select case when s.method in (2, 5, 6) then 'not_x402' when l.class = 'test' then 'test_relayer' end as reason
+		select case when s.method in (2, 5, 6) then 'not_x402' when l.class = 'test' then 'test_relayer'
+			when s.method = 7 and f.id is null then 'routed_unlisted' end as reason
 	) x
 	returning tier
 )

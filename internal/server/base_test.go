@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -24,7 +25,9 @@ type twoChains struct {
 	day  int64
 }
 
-func buildTwoChains(t *testing.T) twoChains {
+func buildTwoChains(t *testing.T) twoChains { return buildTwoChainsWith(t, nil) }
+
+func buildTwoChainsWith(t *testing.T, extra func(day int64) []testkit.Row) twoChains {
 	t.Helper()
 	d, mcfg, reg := load(t)
 	b := d.Other(t, 8453, true)
@@ -38,12 +41,17 @@ func buildTwoChains(t *testing.T) twoChains {
 	progTime := time.Now().Unix() - 60
 	day := progTime / 86400
 	d.SetProgress(t, progress, progTime)
-	b.SetProgress(t, progress, progTime)
 	d.Insert(t, usdc(testkit.Row{Block: 100, LogIndex: 1, BlockTime: dayTime(day, 50), Tx: testkit.Hash(100), Payer: testkit.Addr(1), Payee: testkit.Addr(2), Amount: "700"}))
 	rows := []testkit.Row{
 		{Block: 200, LogIndex: 1, BlockTime: dayTime(day, 60), Tx: testkit.Hash(200), Method: "eip3009_transfer", Token: baseUSDC, Payer: testkit.Addr(11), Payee: testkit.Addr(12), Nonce: testkit.Hash(2000), Relayer: cdpTx, TxTo: baseUSDC, Selector: "0xe3ee160e", Amount: "5000", Codes: cdpCode},
 		{Block: 201, LogIndex: 4, BlockTime: dayTime(day, 61), Tx: testkit.Hash(201), Method: "eip3009_transfer", Token: baseUSDC, Payer: testkit.Addr(13), Payee: testkit.Addr(12), Nonce: testkit.Hash(2001), Relayer: cdpTx, TxTo: baseUSDC, Selector: "0xe3ee160e", Amount: "2500", Codes: cdpCode},
 	}
+	baseProgress := int64(progress)
+	if extra != nil {
+		rows = append(rows, extra(day)...)
+		baseProgress = rows[len(rows)-1].Block + 100
+	}
+	b.SetProgress(t, baseProgress, progTime)
 	b.Insert(t, rows...)
 	for _, c := range []struct {
 		cfg config.Config
@@ -59,7 +67,7 @@ func buildTwoChains(t *testing.T) twoChains {
 func TestBaseStatusAnswersWithItsOwnRowsAndCoverage(t *testing.T) {
 	w := buildTwoChains(t)
 	r := get(t, w.h, baseRoot+"/status")
-	if r.code != 200 || r.body["chain"] != "eip155:8453" || r.body["registry_version"] != "2026-10-13.2" {
+	if r.code != 200 || r.body["chain"] != "eip155:8453" || r.body["registry_version"] != "2026-10-16.1" {
 		t.Fatalf("status %d %s", r.code, r.raw)
 	}
 	if rows := r.body["rows"].(map[string]any); rows["payments"] != float64(2) || rows["tier_a"] != float64(2) {
@@ -128,20 +136,67 @@ func TestBasePaymentsCarryTheBaseIDAndChain(t *testing.T) {
 func TestBaseRegistryListsTheBuilderCode(t *testing.T) {
 	w := buildTwoChains(t)
 	r := get(t, w.h, baseRoot+"/registry")
-	if r.code != 200 || r.body["version"] != "2026-10-13.2" {
+	if r.code != 200 || r.body["version"] != "2026-10-16.1" {
 		t.Fatalf("registry %d %s", r.code, r.raw)
 	}
 	fs := r.body["facilitators"].([]any)
 	f := fs[0].(map[string]any)
-	if len(fs) != 1 || f["id"] != "coinbase-cdp" || len(f["addresses"].([]any)) != 20 || f["builder_codes"].([]any)[0] != "cdp_facil1" {
+	if len(fs) != 2 || f["id"] != "coinbase-cdp" || len(f["addresses"].([]any)) != 20 || f["builder_codes"].([]any)[0] != "cdp_facil1" {
 		t.Fatalf("facilitators %v", fs)
 	}
-	if len(r.body["relayers"].([]any)) != 20 {
+	if p := fs[1].(map[string]any); p["id"] != "payai" || len(p["addresses"].([]any)) != 4 || p["builder_codes"] != nil {
+		t.Fatalf("PayAI %v", p)
+	}
+	if len(r.body["relayers"].([]any)) != 24 {
 		t.Fatalf("relayers %v", r.body["relayers"])
 	}
 	m := get(t, w.h, base+"/registry")
 	if m.body["checksum"] != "123a6e6c0d5498edb63b4af92319dd147a5b64b5956ec4e522089cd68f74ad19" || strings.Contains(string(m.raw), "builder_codes") {
 		t.Fatalf("Monad registry changed: %s", m.raw)
+	}
+}
+
+const (
+	payaiSigner = "0xc6699d2aada6c36dfea5c248dd70f9cb0235cb63"
+	multicall3  = "0xca11bde05977b3631167028862be2a173976ca11"
+)
+
+func routedRows(day int64) []testkit.Row {
+	routed := func(block int64, relayer string, payer int) testkit.Row {
+		return testkit.Row{
+			Block: block, LogIndex: 2, BlockTime: dayTime(day, int64(40+payer)), Tx: testkit.Hash(int(block)), Method: "eip3009_routed", Token: baseUSDC,
+			Payer: testkit.Addr(payer), Payee: testkit.Addr(12), Nonce: testkit.Hash(int(block) + 10000), Relayer: relayer, TxTo: multicall3,
+			Selector: "0x82ad56cb", Amount: "10000", ValidAfter: "0", ValidBefore: "1791213857",
+		}
+	}
+	return []testkit.Row{routed(52662884, payaiSigner, 21), routed(52662885, unlisted, 22)}
+}
+
+func routedHandler(t *testing.T) http.Handler { return buildTwoChainsWith(t, routedRows).h }
+
+func TestRoutedPaymentsCountForAListedFacilitatorOnly(t *testing.T) {
+	h := routedHandler(t)
+	items := itemsOf(t, ok(t, h, baseRoot+"/payments?method=eip3009_routed&tier=all"))
+	if len(items) != 2 {
+		t.Fatalf("%d routed payments, want 2", len(items))
+	}
+	unlistedRow, payai := items[0], items[1]
+	if payai["method"] != "eip3009_routed" || payai["tier"] != "A" || payai["facilitator"] != "payai" || payai["reason"] != nil ||
+		payai["payee"] != testkit.Addr(12) || payai["amount"] != "10000" || payai["tx_to"] != multicall3 || payai["genuine"] == nil {
+		t.Fatalf("PayAI payment %v", payai)
+	}
+	if unlistedRow["tier"] != "X" || unlistedRow["reason"] != "routed_unlisted" || unlistedRow["facilitator"] != nil || unlistedRow["genuine"] != nil {
+		t.Fatalf("unlisted payment %v", unlistedRow)
+	}
+	if n := len(itemsOf(t, ok(t, h, baseRoot+"/payments?method=eip3009_routed"))); n != 1 {
+		t.Fatalf("tier A holds %d routed payments, want 1", n)
+	}
+	ids := []string{}
+	for _, it := range itemsOf(t, ok(t, h, baseRoot+"/leaderboards/facilitators")) {
+		ids = append(ids, it["id"].(string))
+	}
+	if slices.Sort(ids); strings.Join(ids, ",") != "coinbase-cdp,payai" {
+		t.Fatalf("leaderboard ids %v", ids)
 	}
 }
 

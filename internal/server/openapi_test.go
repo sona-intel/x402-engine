@@ -100,6 +100,7 @@ func servedCases() []specCase {
 		{name: "base facilitator daily", path: baseRoot + "/facilitators/coinbase-cdp/daily", handler: baseHandler},
 		{name: "base payments", path: baseRoot + "/payments", handler: baseHandler},
 		{name: "base tx", path: baseRoot + "/payments/" + testkit.Hash(200), handler: baseHandler},
+		{name: "base routed payments of every tier", path: baseRoot + "/payments?method=eip3009_routed&tier=all", handler: routedHandler},
 
 		{name: "limit zero", path: base + "/payments?limit=0", status: http.StatusBadRequest, malformed: true},
 		{name: "leaderboard limit 101", path: base + "/leaderboards/sellers?limit=101", status: http.StatusBadRequest, malformed: true},

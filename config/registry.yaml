@@ -42,7 +42,8 @@ entries:
       - address: "0xcace789ea79011b164f9e3cc4146de0bd3eb41a8"
 chains:
   eip155:8453:
-    version: 2026-10-13.2
+    version: 2026-10-16.1
+    # FluxA stays out until its contract 0x6d27486790ce5918f1bc68be3fccc25304d09d31 is decoded, its routed payee is an intermediate and not the seller
     entries:
       - id: coinbase-cdp
         name: Coinbase CDP
@@ -71,6 +72,20 @@ chains:
           - address: "0xca5e87f82b3fa093800e6ad67d621a427d79c70d"
           - address: "0xe72f0af4cf41356d433723547f1412ca27fbb1b8"
           - address: "0xe74817f4cdc15844314812b2271276e64e890fae"
+      - id: payai
+        name: PayAI
+        url: https://facilitator.payai.network
+        class: facilitator
+        # signers from PayAI's own /supported, each from its first Base payment Sona holds, mostly routed through Multicall3
+        addresses:
+          - address: "0xb2bd29925cbbcea7628279c91945ca5b98bf371b"
+            from_block: 51234129
+          - address: "0xc6699d2aada6c36dfea5c248dd70f9cb0235cb63"
+            from_block: 51234281
+          - address: "0x25659315106580ce2a787ceec5efb2d347b539c9"
+            from_block: 51330300
+          - address: "0xb8f41cb13b1f213da1e94e1b742ec1323235c48f"
+            from_block: 51334160
   # Circle's relayers are not known yet, so Arc payments stay unlisted until they are learned from the chain
   eip155:5042:
     version: 2026-10-14.1
